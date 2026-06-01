@@ -1,10 +1,28 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
+
+  <PropertyGroup>
+    <Authors>Dmitry Kovyazin</Authors>
+    <Company>BrandUp</Company>
+    <Title>BrandUp.Extensions.ObjectStorage</Title>
+    <Description>S3-compatible object storage implementation using AWS SDK. Supports Yandex Cloud Object Storage, Amazon S3, MinIO, and other S3-compatible providers. Includes bucket management, versioning, lifecycle rules and ACL.</Description>
+    <PackageTags>s3;objectstorage;awssdk;yandexcloud;amazons3;minio;cloud;storage</PackageTags>
+    <PackageProjectUrl>https://github.com/brandup/BrandUp.Extensions.ObjectStorage</PackageProjectUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
+    <GenerateDocumentationFile>True</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\icon.png" Pack="true" PackagePath="\" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="AWSSDK.S3" Version="4.0.23.4" />

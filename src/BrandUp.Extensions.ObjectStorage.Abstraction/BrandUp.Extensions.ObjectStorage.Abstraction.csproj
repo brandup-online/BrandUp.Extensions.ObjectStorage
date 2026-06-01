@@ -7,4 +7,22 @@
     <RootNamespace>BrandUp.Extensions.ObjectStorage</RootNamespace>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <Authors>Dmitry Kovyazin</Authors>
+    <Company>BrandUp</Company>
+    <Title>BrandUp.Extensions.ObjectStorage.Abstraction</Title>
+    <Description>Abstractions for S3-compatible object storage: IObjectStorage, IObjectStorageClient, IObjectBucket, BucketSettings and JSON extension methods. No dependency on AWS SDK.</Description>
+    <PackageTags>s3;objectstorage;abstractions;cloud;storage;yandexcloud</PackageTags>
+    <PackageProjectUrl>https://github.com/brandup/BrandUp.Extensions.ObjectStorage</PackageProjectUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
+    <GenerateDocumentationFile>True</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\icon.png" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
 </Project>

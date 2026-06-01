@@ -1,0 +1,139 @@
+trigger:
+  - main
+
+pr: none
+
+resources:
+  - repo: self
+
+variables:
+  - name: vmImageName
+    value: "ubuntu-latest"
+  - name: restore-projects
+    value: "**/*.csproj"
+  - name: test-projects
+    value: "**/*[Tt]ests/*.csproj"
+  - name: pack-projects
+    value: "**/src/*/*.csproj"
+  - name: buildPlatform
+    value: "Any CPU"
+  - name: buildConfiguration
+    value: "Release"
+  - name: envName
+    value: "nuget"
+  - name: version-major
+    value: "1"
+  - name: version-minor
+    value: "0"
+
+name: $(version-major).$(version-minor).$(rev:r)
+
+pool:
+  name: Test
+
+stages:
+  - stage: Build
+    displayName: Build stage
+    jobs:
+      - job: BuildNet
+        displayName: Build NET
+        pool:
+          name: Test
+          workspace:
+            clean: all
+        steps:
+          - script: |
+              echo "BrandUp.Extensions.ObjectStorage $(Build.BuildNumber)"
+            displayName: "print version"
+
+          - checkout: self
+            fetchDepth: 1
+            clean: "true"
+            persistCredentials: "true"
+
+          - task: UseDotNet@2
+            displayName: "use dotnet 10.x"
+            inputs:
+              packageType: "sdk"
+              version: "10.x"
+
+          - task: DotNetCoreCLI@2
+            displayName: "dotnet restore"
+            inputs:
+              command: "restore"
+              projects: $(restore-projects)
+              feedRestore: "BrandUp"
+
+          - task: DotNetCoreCLI@2
+            displayName: "dotnet build"
+            inputs:
+              command: "build"
+              projects: $(restore-projects)
+              arguments: --configuration $(buildConfiguration) /p:Version=$(Build.BuildNumber)
+
+          - task: DotNetCoreCLI@2
+            displayName: "dotnet test"
+            inputs:
+              command: test
+              projects: $(test-projects)
+              arguments: --configuration $(buildConfiguration) --no-build --no-restore --collect "Code coverage"
+              failTaskOnFailedTests: true
+              publishTestResults: true
+              testRunTitle: "solution tests"
+
+          - task: DotNetCoreCLI@2
+            displayName: "dotnet pack"
+            inputs:
+              command: "custom"
+              projects: $(pack-projects)
+              custom: "pack"
+              arguments: "--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory) /p:Version=$(Build.BuildNumber)"
+
+          - publish: $(build.artifactstagingdirectory)
+            displayName: publish artifact
+            condition: succeededOrFailed()
+            artifact: net
+
+      - job: GitTag
+        displayName: Add git tag
+        dependsOn: [BuildNet]
+        condition: succeeded()
+        steps:
+          - checkout: self
+            fetchDepth: 1
+            clean: "true"
+            persistCredentials: "true"
+
+          - powershell: |
+              git config --global user.name "AzureDevOps Agent"
+              git tag "$(Build.BuildNumber)" --force
+              git push origin "$(Build.BuildNumber)" --force
+              Write-Output "Tagging $(Build.Repository.Name) with $(Build.BuildNumber)"
+            displayName: set git tag
+
+  - stage: Production
+    displayName: Deploy stage
+    dependsOn: Build
+    jobs:
+      - deployment: Production
+        condition: succeeded()
+        displayName: Production
+        pool:
+          vmImage: $(vmImageName)
+        environment: $(envName)
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: UseDotNet@2
+                  displayName: "use dotnet 10.x"
+                  inputs:
+                    packageType: "sdk"
+                    version: "10.x"
+
+                - task: DotNetCoreCLI@2
+                  displayName: "publish nuget"
+                  inputs:
+                    command: push
+                    packagesToPush: '$(Pipeline.Workspace)/net/*.nupkg;!$(Pipeline.Workspace)/net/*.symbols.nupkg;'
+                    publishVstsFeed: '308d26bd-1624-4577-a092-faa67891f2c2'

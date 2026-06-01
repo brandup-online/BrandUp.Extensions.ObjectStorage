@@ -7,6 +7,24 @@
     <RootNamespace>BrandUp.Extensions.ObjectStorage</RootNamespace>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <Authors>Dmitry Kovyazin</Authors>
+    <Company>BrandUp</Company>
+    <Title>BrandUp.Extensions.ObjectStorage.Testing</Title>
+    <Description>In-memory fake implementations of BrandUp.Extensions.ObjectStorage abstractions for use in unit and integration tests. No dependency on AWS SDK.</Description>
+    <PackageTags>s3;objectstorage;testing;fake;inmemory;xunit</PackageTags>
+    <PackageProjectUrl>https://github.com/brandup/BrandUp.Extensions.ObjectStorage</PackageProjectUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
+    <GenerateDocumentationFile>True</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\icon.png" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\BrandUp.Extensions.ObjectStorage.Abstraction\BrandUp.Extensions.ObjectStorage.Abstraction.csproj" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.8" />
