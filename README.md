@@ -115,3 +115,44 @@ catch (ObjectStorageException ex)
 Поддерживаемые типы свойств: `string`, `int`, `bool`, `Guid`, `DateTime`, `decimal`, `enum` и любые типы, для которых доступен `TypeConverter`.
 
 Значения `null` при сериализации пропускаются.
+
+---
+
+## Yandex Cloud Object Storage
+
+### Конфигурация
+
+```csharp
+services.AddObjectStorage(opts =>
+{
+    opts.ServiceUrl           = "https://storage.yandexcloud.net";
+    opts.AuthenticationRegion = "ru-central1";
+    opts.AccessKeyId          = "<идентификатор статического ключа>";
+    opts.SecretAccessKey      = "<секретный ключ>";
+})
+.AddMapping<UserPhotoMetadata>("my-bucket/photos");
+```
+
+Ключи доступа создаются в консоли Yandex Cloud: **IAM → Сервисные аккаунты → Ключи доступа**.
+
+### Совместимость функций
+
+| Функция | YC |
+|---|:---:|
+| Загрузка / чтение / удаление объектов | ✅ |
+| Метаданные объектов | ✅ |
+| Создание / удаление бакетов | ✅ |
+| Список бакетов | ✅ |
+| Версионирование | ✅ |
+| Lifecycle rules (срок хранения) | ✅ |
+| Управление доступом (ACL) | ⚠️ |
+
+### Ограничения ACL в Yandex Cloud
+
+Yandex Cloud использует **IAM-политики** как основной механизм управления доступом. ACL-операции (`GetAccessAsync` / `SetAccessAsync` через `IObjectBucket.UpdateSettingsAsync`) технически выполняются через S3-совместимый API, однако публичный доступ к бакету может быть заблокирован политикой организации независимо от настроек ACL.
+
+Для управления публичным доступом рекомендуется использовать консоль Yandex Cloud или CLI (`yc storage bucket update --public-read`).
+
+### Имена бакетов
+
+В Yandex Cloud имена бакетов уникальны глобально. При использовании `CreateBucketAsync` убедитесь, что имя уникально в рамках всего Yandex Cloud, а не только вашего аккаунта.

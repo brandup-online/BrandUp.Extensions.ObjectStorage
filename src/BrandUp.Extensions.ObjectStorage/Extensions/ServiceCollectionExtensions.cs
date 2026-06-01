@@ -14,6 +14,7 @@ public static class ServiceCollectionExtensions
         services.AddOptions<ObjectStorageOptions>().Configure(configure).ValidateOnStart();
         services.AddSingleton<IValidateOptions<ObjectStorageOptions>, ObjectStorageOptionsValidator>();
         services.AddSingleton<IS3Client, S3Client>();
+        services.AddSingleton<IObjectStorageClient, S3ObjectStorageClient>();
         services.AddSingleton<IObjectStorage, S3ObjectStorage>();
 
         return new ObjectStorageBuilder(services);

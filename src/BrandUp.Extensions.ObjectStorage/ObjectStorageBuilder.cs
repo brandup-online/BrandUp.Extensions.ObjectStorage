@@ -26,6 +26,11 @@ public class ObjectStorageBuilder(IServiceCollection services)
 
         services.Configure<ObjectStorageMappingsOptions>(opts =>
             opts.Destinations[typeof(TMetadata)] = destination);
+
+        // Регистрация типизированного бакета для прямого внедрения через DI
+        services.AddSingleton<IObjectBucket<TMetadata>>(sp =>
+            sp.GetRequiredService<IObjectStorageClient>().GetBucket<TMetadata>());
+
         return this;
     }
 }
