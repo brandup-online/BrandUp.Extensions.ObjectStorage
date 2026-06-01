@@ -1,4 +1,8 @@
 <Solution>
   <Project Path="src/BrandUp.Extensions.ObjectStorage.Abstraction/BrandUp.Extensions.ObjectStorage.Abstraction.csproj" />
   <Project Path="src/BrandUp.Extensions.ObjectStorage/BrandUp.Extensions.ObjectStorage.csproj" />
+  <Project Path="src/BrandUp.Extensions.ObjectStorage.Testing/BrandUp.Extensions.ObjectStorage.Testing.csproj" />
+  <Project Path="test/BrandUp.Extensions.ObjectStorage.Abstraction.Tests/BrandUp.Extensions.ObjectStorage.Abstraction.Tests.csproj" />
+  <Project Path="test/BrandUp.Extensions.ObjectStorage.Tests/BrandUp.Extensions.ObjectStorage.Tests.csproj" />
+  <Project Path="test/BrandUp.Extensions.ObjectStorage.Testing.Tests/BrandUp.Extensions.ObjectStorage.Testing.Tests.csproj" />
 </Solution>

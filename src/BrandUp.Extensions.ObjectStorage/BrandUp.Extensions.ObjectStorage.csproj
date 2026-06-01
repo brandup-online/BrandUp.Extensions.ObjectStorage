@@ -16,4 +16,8 @@
     <ProjectReference Include="..\BrandUp.Extensions.ObjectStorage.Abstraction\BrandUp.Extensions.ObjectStorage.Abstraction.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="BrandUp.Extensions.ObjectStorage.Tests" />
+  </ItemGroup>
+
 </Project>
