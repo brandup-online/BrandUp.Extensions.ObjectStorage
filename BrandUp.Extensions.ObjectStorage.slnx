@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/BrandUp.Extensions.ObjectStorage.Abstraction/BrandUp.Extensions.ObjectStorage.Abstraction.csproj" />
+  <Project Path="src/BrandUp.Extensions.ObjectStorage/BrandUp.Extensions.ObjectStorage.csproj" />
+</Solution>
