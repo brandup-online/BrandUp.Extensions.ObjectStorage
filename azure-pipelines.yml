@@ -20,7 +20,7 @@ variables:
   - name: buildConfiguration
     value: "Release"
   - name: envName
-    value: "nuget"
+    value: "brandup-extensions-objectstorage"
   - name: version-major
     value: "1"
   - name: version-minor
