@@ -13,7 +13,7 @@ public class MinioStorageTests(MinioFixture fixture) : IClassFixture<MinioFixtur
     [MinioFact]
     public async Task Bucket_Lifecycle_CreateExistsListDrop()
     {
-        var name = "it-" + Guid.NewGuid().ToString("n");
+        var name = "it" + Guid.NewGuid().ToString("n");
 
         await fixture.Client.CreateBucketAsync(name);
         try

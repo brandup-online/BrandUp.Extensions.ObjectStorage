@@ -12,8 +12,12 @@ public sealed class MinioFixture : IAsyncLifetime
 {
     ServiceProvider? _provider;
 
-    /// <summary>Name of the throwaway bucket created for object-level tests; unique per test run.</summary>
-    public string BucketName { get; } = "it-" + Guid.NewGuid().ToString("n");
+    /// <summary>
+    /// Name of the throwaway bucket created for object-level tests; unique per test run. Uses only lowercase
+    /// letters and digits (Guid "n" format) so it is valid both as an S3 bucket name and as an AddMapping
+    /// destination (which allows only letters, digits and '/').
+    /// </summary>
+    public string BucketName { get; } = "it" + Guid.NewGuid().ToString("n");
 
     public IObjectStorageClient Client => _provider?.GetRequiredService<IObjectStorageClient>()
         ?? throw new InvalidOperationException("MinIO is not configured.");
