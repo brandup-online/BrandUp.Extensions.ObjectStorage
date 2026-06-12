@@ -133,6 +133,10 @@ await bucket.UpdateSettingsAsync(s =>
 | `AuthenticationRegion` | Регион авторизации |
 | `AccessKeyId` | Идентификатор ключа доступа |
 | `SecretAccessKey` | Секретный ключ доступа |
+| `SessionToken` | Токен сессии для временных (STS) кред. Запросы подписываются заголовком `X-Amz-Security-Token`. См. [Временные креды (STS)](#временные-креды-sts). |
+| `ForcePathStyle` | Path-style адресация (`{serviceUrl}/{bucket}`) вместо virtual-hosted (`{bucket}.{serviceUrl}`). Нужно для MinIO. По умолчанию `false`. |
+
+При статическом доступе обязательны `AccessKeyId` + `SecretAccessKey`. Если зарегистрирован провайдер кред (`UseCredentialsProvider`), они становятся необязательными. `ServiceUrl` и `AuthenticationRegion` обязательны всегда.
 
 ### `BucketSettings`
 
@@ -191,6 +195,77 @@ var result = await bucket.ReadJsonAsync<ReportMetadata, ReportContent>(id);
 ```csharp
 catch (ObjectStorageException ex) when (ex.StatusCode == HttpStatusCode.Forbidden) { }
 catch (ObjectStorageException ex) { }
+```
+
+---
+
+## Временные креды (STS)
+
+Поддерживаются три режима аутентификации. Приоритет при выборе: **провайдер → `SessionToken` → статические `AccessKeyId`/`SecretAccessKey`**.
+
+### 1. Статические ключи
+
+Режим по умолчанию — см. [Быстрый старт](#2-зарегистрировать-в-di).
+
+### 2. Фиксированный токен сессии
+
+Для коротких/одноразовых сценариев с уже полученными временными кредами без авто-обновления. SDK подписывает запросы заголовком `X-Amz-Security-Token`.
+
+```csharp
+services.AddObjectStorage(opts =>
+{
+    opts.ServiceUrl           = "https://storage.yandexcloud.net";
+    opts.AuthenticationRegion = "ru-central1";
+    opts.AccessKeyId          = "...";
+    opts.SecretAccessKey      = "...";
+    opts.SessionToken         = "...";
+});
+```
+
+### 3. Провайдер с авто-обновлением
+
+Основной режим для временных кред с ограниченным сроком жизни (например, Yandex STS, TTL ≤ 12 ч). `AmazonS3Client` создаётся **один раз**, а креды обновляются «на месте» — singleton-клиент не пересоздаётся.
+
+```csharp
+public sealed record ObjectStorageCredentials(
+    string AccessKeyId, string SecretAccessKey, string? SessionToken, DateTimeOffset? ExpiresUtc);
+
+public interface IObjectStorageCredentialsProvider
+{
+    ObjectStorageCredentials GetCurrent();                                  // читается синхронно SDK при подписи
+    Task RefreshAsync(CancellationToken cancellationToken = default);       // проактивное обновление кеша
+}
+```
+
+```csharp
+services.AddObjectStorage(opts =>
+{
+    opts.ServiceUrl           = "https://storage.yandexcloud.net";
+    opts.AuthenticationRegion = "ru-central1";
+    // AccessKeyId / SecretAccessKey не нужны — креды отдаёт провайдер
+})
+.UseCredentialsProvider<MyCredentialsProvider>()   // либо UseCredentialsProvider(sp => ...)
+.AddMapping<UserPhotoMetadata>("my-bucket/photos");
+```
+
+> **Sync/async:** `GetCurrent()` обязан отдавать **закешированные** креды синхронно (вызывается SDK при подписи каждого запроса). Получение свежих кред — асинхронное и идёт **вне** SDK: потребитель проактивно обновляет кеш до `ExpiresUtc` (например, по таймеру), `RefreshAsync` — точка такого обновления. Минтинг STS (вызов STS-эндпоинта) — на стороне потребителя, пакет только потребляет готовые креды.
+
+---
+
+## MinIO
+
+MinIO не поддерживает virtual-hosted адресацию, поэтому обязателен `ForcePathStyle = true`.
+
+```csharp
+services.AddObjectStorage(opts =>
+{
+    opts.ServiceUrl           = "http://localhost:9000";
+    opts.AuthenticationRegion = "us-east-1";
+    opts.AccessKeyId          = "minioadmin";
+    opts.SecretAccessKey      = "minioadmin";
+    opts.ForcePathStyle       = true;
+})
+.AddMapping<UserPhotoMetadata>("photos");
 ```
 
 ---
@@ -255,8 +330,15 @@ services.AddObjectStorage(opts =>
 | Список бакетов | ✅ |
 | Версионирование | ✅ |
 | Lifecycle rules | ✅ |
+| Временные креды (STS) | ✅ |
 | Управление доступом (ACL) | ⚠️ |
 
 ACL-операции работают через S3-совместимый API, однако публичный доступ может быть заблокирован политикой организации. Для управления публичным доступом рекомендуется консоль YC или CLI: `yc storage bucket update --public-read`.
 
 Имена бакетов в Yandex Cloud уникальны глобально — не только в рамках вашего аккаунта.
+
+### Временные креды Yandex STS
+
+Формат временного ключа Yandex STS (`Key ID` + `Secret key` + `Session token`, TTL ≤ 12 ч) совпадает с `ObjectStorageCredentials`, а адресация — virtual-hosted (`ForcePathStyle` оставить `false`). Используйте [`SessionToken`](#2-фиксированный-токен-сессии) или [провайдер с авто-обновлением](#3-провайдер-с-авто-обновлением).
+
+> ⚠️ Политика временного ключа Yandex STS привязана к **одному** бакету — одним ключом нельзя работать с несколькими бакетами. Если узлу нужны несколько бакетов под временными кредами, потребуется отдельный ключ/провайдер на каждый.
