@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.RegularExpressions;
+using Amazon.Runtime;
 using Amazon.S3;
 using Amazon.S3.Model;
 using Microsoft.Extensions.Options;
@@ -13,18 +14,47 @@ internal class S3Client : IS3Client, IDisposable
 
     readonly AmazonS3Client _s3;
 
-    public S3Client(IOptions<ObjectStorageOptions> options)
+    // credentialsProvider is injected via DI default-value binding: present only when registered through
+    // ObjectStorageBuilder.UseCredentialsProvider, otherwise null (static or session-token credentials).
+    public S3Client(IOptions<ObjectStorageOptions> options, IObjectStorageCredentialsProvider? credentialsProvider = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         var opts = options.Value;
 
-        _s3 = new AmazonS3Client(opts.AccessKeyId, opts.SecretAccessKey, new AmazonS3Config
+        // Built once: a RefreshingAWSCredentials renews temp creds in place, so the singleton client is never recreated.
+        _s3 = new AmazonS3Client(CreateCredentials(opts, credentialsProvider), new AmazonS3Config
         {
             ServiceURL = opts.ServiceUrl,
             AuthenticationRegion = opts.AuthenticationRegion,
             ForcePathStyle = opts.ForcePathStyle,
-            SignatureMethod = Amazon.Runtime.SigningAlgorithm.HmacSHA256
+            SignatureMethod = SigningAlgorithm.HmacSHA256
         });
+    }
+
+    // Priority: registered provider (auto-refresh) -> session token (fixed temp creds) -> static ak/sk.
+    internal static AWSCredentials CreateCredentials(ObjectStorageOptions opts, IObjectStorageCredentialsProvider? provider)
+    {
+        if (provider is not null)
+            return new ProviderRefreshingCredentials(provider);
+
+        if (!string.IsNullOrEmpty(opts.SessionToken))
+            return new SessionAWSCredentials(opts.AccessKeyId, opts.SecretAccessKey, opts.SessionToken);
+
+        return new BasicAWSCredentials(opts.AccessKeyId, opts.SecretAccessKey);
+    }
+
+    // Bridges IObjectStorageCredentialsProvider (cached, possibly temporary) to the SDK's refresh mechanism.
+    // GenerateNewCredentials() is synchronous, so the provider must serve cached creds without blocking;
+    // the consumer renews the cache out-of-band (e.g. on a timer) before ExpiresUtc.
+    sealed class ProviderRefreshingCredentials(IObjectStorageCredentialsProvider provider) : RefreshingAWSCredentials
+    {
+        protected override CredentialsRefreshState GenerateNewCredentials()
+        {
+            var c = provider.GetCurrent();
+            return new CredentialsRefreshState(
+                new ImmutableCredentials(c.AccessKeyId, c.SecretAccessKey, c.SessionToken),
+                (c.ExpiresUtc ?? DateTimeOffset.UtcNow.AddHours(1)).UtcDateTime);
+        }
     }
 
     #region Object operations
