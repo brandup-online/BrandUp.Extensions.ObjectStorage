@@ -8,6 +8,13 @@ public class ObjectStorageOptions
     public string? AuthenticationRegion { get; set; }
     public string? AccessKeyId { get; set; }
     public string? SecretAccessKey { get; set; }
+
+    /// <summary>
+    /// Use path-style addressing (<c>{serviceUrl}/{bucket}</c>) instead of virtual-hosted-style
+    /// (<c>{bucket}.{serviceUrl}</c>). Required for S3-compatible servers such as MinIO that do not
+    /// support virtual-hosted addressing. Defaults to <see langword="false"/>.
+    /// </summary>
+    public bool ForcePathStyle { get; set; }
 }
 
 internal class ObjectStorageOptionsValidator : IValidateOptions<ObjectStorageOptions>

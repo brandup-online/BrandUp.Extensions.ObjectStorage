@@ -22,6 +22,7 @@ internal class S3Client : IS3Client, IDisposable
         {
             ServiceURL = opts.ServiceUrl,
             AuthenticationRegion = opts.AuthenticationRegion,
+            ForcePathStyle = opts.ForcePathStyle,
             SignatureMethod = Amazon.Runtime.SigningAlgorithm.HmacSHA256
         });
     }

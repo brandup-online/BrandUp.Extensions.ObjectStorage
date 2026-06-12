@@ -95,9 +95,57 @@ stages:
             condition: succeededOrFailed()
             artifact: net
 
+      - job: IntegrationTests
+        displayName: Integration tests (MinIO)
+        pool:
+          vmImage: $(vmImageName)
+        steps:
+          - checkout: self
+            fetchDepth: 1
+            clean: "true"
+
+          - task: UseDotNet@2
+            displayName: "use dotnet 10.x"
+            inputs:
+              packageType: "sdk"
+              version: "10.x"
+
+          - script: |
+              docker run -d --name minio -p 9000:9000 \
+                -e MINIO_ROOT_USER=minioadmin \
+                -e MINIO_ROOT_PASSWORD=minioadmin \
+                minio/minio server /data
+              echo "waiting for MinIO to become ready..."
+              for i in $(seq 1 30); do
+                if curl -sf http://localhost:9000/minio/health/ready; then
+                  echo "MinIO is ready"; exit 0
+                fi
+                sleep 2
+              done
+              echo "MinIO did not become ready in time"; exit 1
+            displayName: "start MinIO"
+
+          - task: DotNetCoreCLI@2
+            displayName: "dotnet test (integration)"
+            env:
+              MINIO_SERVICE_URL: http://localhost:9000
+              MINIO_ACCESS_KEY: minioadmin
+              MINIO_SECRET_KEY: minioadmin
+            inputs:
+              command: test
+              projects: "**/BrandUp.Extensions.ObjectStorage.Tests/*.csproj"
+              arguments: --configuration $(buildConfiguration) --filter Category=Integration
+              failTaskOnFailedTests: true
+              publishTestResults: true
+              testRunTitle: "integration tests (MinIO)"
+
+          - script: docker rm -f minio
+            displayName: "stop MinIO"
+            condition: always()
+
       - job: GitTag
         displayName: Add git tag
-        dependsOn: [BuildNet]
+        dependsOn: [BuildNet, IntegrationTests]
         condition: succeeded()
         steps:
           - checkout: self
