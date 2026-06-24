@@ -40,12 +40,25 @@ public class ObjectStorageBuilder(IServiceCollection services)
 
         foreach (var c in destination)
         {
-            if (!char.IsLetterOrDigit(c) && c != '/')
-                throw new ArgumentException($"Invalid character '{c}'. Only letters, digits, and '/' are allowed.", nameof(destination));
+            if (!char.IsLetterOrDigit(c) && c != '/' && c != '-' && c != '.')
+                throw new ArgumentException($"Invalid character '{c}'. Only letters, digits, '-', '.', and '/' are allowed.", nameof(destination));
         }
 
         if (destination.Contains("//"))
             throw new ArgumentException("Destination contains consecutive '/' characters.", nameof(destination));
+
+        if (destination.Contains(".."))
+            throw new ArgumentException("Destination contains consecutive '.' characters.", nameof(destination));
+
+        var bucketName = destination.Contains('/')
+            ? destination[..destination.IndexOf('/')]
+            : destination;
+
+        if (bucketName[0] == '-' || bucketName[0] == '.')
+            throw new ArgumentException("Bucket name must start with a letter or digit.", nameof(destination));
+
+        if (bucketName[^1] == '-' || bucketName[^1] == '.')
+            throw new ArgumentException("Bucket name must end with a letter or digit.", nameof(destination));
 
         services.Configure<ObjectStorageMappingsOptions>(opts =>
             opts.Destinations[typeof(TMetadata)] = destination);

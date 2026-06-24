@@ -21,10 +21,9 @@ public class ObjectStorageBuilderTests
     }
 
     [Theory]
-    [InlineData("bucket-name")]
-    [InlineData("bucket name")]
-    [InlineData("bucket@name")]
-    [InlineData("bucket.name")]
+    [InlineData("bucket name")]   // пробел
+    [InlineData("bucket@name")]   // @
+    [InlineData("bucket_name")]   // подчёркивание
     public void AddMapping_ThrowsForInvalidChars(string destination)
     {
         Assert.Throws<ArgumentException>(() => _builder.AddMapping<TestMetadata>(destination));
@@ -36,14 +35,35 @@ public class ObjectStorageBuilderTests
         Assert.Throws<ArgumentException>(() => _builder.AddMapping<TestMetadata>("bucket//prefix"));
     }
 
+    [Fact]
+    public void AddMapping_ThrowsForConsecutiveDots()
+    {
+        Assert.Throws<ArgumentException>(() => _builder.AddMapping<TestMetadata>("my..bucket"));
+    }
+
+    [Theory]
+    [InlineData("-bucket")]
+    [InlineData(".bucket")]
+    public void AddMapping_ThrowsWhenBucketNameStartsWithDashOrDot(string destination)
+    {
+        Assert.Throws<ArgumentException>(() => _builder.AddMapping<TestMetadata>(destination));
+    }
+
+    [Theory]
+    [InlineData("bucket-")]
+    [InlineData("bucket.")]
+    public void AddMapping_ThrowsWhenBucketNameEndsWithDashOrDot(string destination)
+    {
+        Assert.Throws<ArgumentException>(() => _builder.AddMapping<TestMetadata>(destination));
+    }
+
     [Theory]
     [InlineData("/bucket")]
     [InlineData("bucket/")]
     [InlineData("  bucket  ")]
     public void AddMapping_NormalizesDestination(string destination)
     {
-        // trimming border slashes and whitespace should succeed
-        var result = _builder.AddMapping<TestMetadata>(destination);
+        var result = _builder.AddMapping<TestMetadata2>(destination);
         Assert.Same(_builder, result);
     }
 
@@ -51,19 +71,26 @@ public class ObjectStorageBuilderTests
     [InlineData("mybucket")]
     [InlineData("mybucket/prefix")]
     [InlineData("mybucket/sub/prefix")]
+    [InlineData("bucket-name")]
+    [InlineData("bucket.name")]
+    [InlineData("my-bucket.v2/some-prefix")]
     public void AddMapping_ValidDestination_ReturnsBuilder(string destination)
     {
-        var result = _builder.AddMapping<TestMetadata>(destination);
+        var result = _builder.AddMapping<TestMetadata3>(destination);
         Assert.Same(_builder, result);
     }
 
     [Fact]
     public void AddMapping_SameTypeMultipleTimes_LastWins()
     {
-        _builder.AddMapping<TestMetadata>("bucket1");
-        var result = _builder.AddMapping<TestMetadata>("bucket2");
+        _builder.AddMapping<TestMetadata4>("bucket1");
+        var result = _builder.AddMapping<TestMetadata4>("bucket2");
         Assert.Same(_builder, result);
     }
 
+    // Отдельные классы метаданных, чтобы тесты не мешали друг другу при регистрации в одном builder'е
     private class TestMetadata : IObjectMetadata { }
+    private class TestMetadata2 : IObjectMetadata { }
+    private class TestMetadata3 : IObjectMetadata { }
+    private class TestMetadata4 : IObjectMetadata { }
 }
