@@ -4,7 +4,7 @@ namespace BrandUp.Extensions.ObjectStorage;
 
 public class FakeObjectStorageIntegrationTests
 {
-    readonly IObjectStorage _storage;
+    readonly IObjectStorageContext _storage;
     readonly IObjectStorageClient _client;
     readonly IObjectBucket<FileMetadata> _bucket;
     readonly FakeObjectStore _store;
@@ -17,13 +17,13 @@ public class FakeObjectStorageIntegrationTests
             .WithBucket("files");
 
         var sp = services.BuildServiceProvider();
-        _storage = sp.GetRequiredService<IObjectStorage>();
+        _storage = sp.GetRequiredService<IObjectStorageContext>();
         _client  = sp.GetRequiredService<IObjectStorageClient>();
         _bucket  = sp.GetRequiredService<IObjectBucket<FileMetadata>>();
         _store   = sp.GetRequiredService<FakeObjectStore>();
     }
 
-    // IObjectStorage tests
+    // IObjectStorageContext tests
 
     [Fact]
     public async Task Storage_Upload_Find_ReturnsMetadata()

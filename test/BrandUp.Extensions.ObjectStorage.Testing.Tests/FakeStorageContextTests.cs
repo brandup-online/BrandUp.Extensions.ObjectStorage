@@ -1,0 +1,265 @@
+using System.Text;
+using Microsoft.Extensions.DependencyInjection;
+
+namespace BrandUp.Extensions.ObjectStorage;
+
+public class FakeStorageContextTests
+{
+    [Fact]
+    public void AddFakeObjectStorage_Context_ResolvesWithPopulatedBuckets()
+    {
+        var services = new ServiceCollection();
+        services.AddFakeObjectStorage<MediaStorage>();
+
+        using var sp = services.BuildServiceProvider();
+        var storage = sp.GetRequiredService<MediaStorage>();
+
+        Assert.Equal("photos", storage.Photos.Name);
+        Assert.Equal("videos", storage.Videos.Name);
+        Assert.Same(storage.Photos, sp.GetRequiredService<IObjectBucket<PhotoMetadata>>());
+    }
+
+    [Fact]
+    public async Task Context_RoundTripsThroughStore()
+    {
+        var services = new ServiceCollection();
+        services.AddFakeObjectStorage<MediaStorage>().WithBucket("photos");
+
+        using var sp = services.BuildServiceProvider();
+        var storage = sp.GetRequiredService<MediaStorage>();
+
+        var id = Guid.NewGuid();
+        await storage.Photos.UploadAsync(id, new PhotoMetadata { FileName = "a.jpg" },
+            new MemoryStream(Encoding.UTF8.GetBytes("content")));
+
+        var found = await storage.Photos.FindOneAsync(id);
+        Assert.NotNull(found);
+        Assert.Equal("a.jpg", found.Metadata.FileName);
+
+        // The context is an IObjectStorageContext over its own buckets.
+        var viaStorage = await storage.FindAsync<PhotoMetadata>(id);
+        Assert.NotNull(viaStorage);
+
+        Assert.True(await storage.DeleteAsync<PhotoMetadata>(id));
+        Assert.Null(await storage.Photos.FindOneAsync(id));
+    }
+
+    [Fact]
+    public async Task Context_PrefixSeparatesObjectsInOneBucket()
+    {
+        var services = new ServiceCollection();
+        var store = new FakeObjectStore();
+        var builder = services.AddFakeObjectStorage<MediaStorage>(store).WithBucket("photos");
+        services.AddFakeObjectStorage<MirrorStorage>(store).WithBucketName("photos", "photos/mirror");
+
+        using var sp = services.BuildServiceProvider();
+        var media = sp.GetRequiredService<MediaStorage>();
+        var mirror = sp.GetRequiredService<MirrorStorage>();
+
+        // Same bucket, same object id, different prefixes ("photos" root vs "photos/mirror").
+        var id = Guid.NewGuid();
+        await media.Photos.UploadAsync(id, new PhotoMetadata { FileName = "original.jpg" }, new MemoryStream([1]));
+        await mirror.Photos.UploadAsync(id, new PhotoMetadata { FileName = "mirror.jpg" }, new MemoryStream([2]));
+
+        Assert.Equal(2, builder.Store.GetObjectCount("photos"));
+        Assert.Equal("original.jpg", (await media.Photos.FindOneAsync(id))!.Metadata.FileName);
+        Assert.Equal("mirror.jpg", (await mirror.Photos.FindOneAsync(id))!.Metadata.FileName);
+
+        // Deleting through one prefix leaves the other untouched.
+        Assert.True(await mirror.Photos.DeleteOneAsync(id));
+        Assert.NotNull(await media.Photos.FindOneAsync(id));
+    }
+
+    [Fact]
+    public async Task WithBucketName_OverridesPhysicalName()
+    {
+        var services = new ServiceCollection();
+        var builder = services.AddFakeObjectStorage<MediaStorage>()
+            .WithBucketName("Photos", "it-photos")     // по имени свойства
+            .WithBucketName("videos", "it-videos")     // по имени из атрибута
+            .WithBucket("it-photos");
+
+        using var sp = services.BuildServiceProvider();
+        var storage = sp.GetRequiredService<MediaStorage>();
+
+        Assert.Equal("it-photos", storage.Photos.Name);
+        Assert.Equal("it-videos", storage.Videos.Name);
+
+        await storage.Photos.UploadAsync(Guid.NewGuid(), new PhotoMetadata(), new MemoryStream([1]));
+        Assert.Equal(1, builder.Store.GetObjectCount("it-photos"));
+    }
+
+    [Fact]
+    public void WithBucketNamePrefixAndSuffix_AppliedToDeclaredNames()
+    {
+        var services = new ServiceCollection();
+        services.AddFakeObjectStorage<MediaStorage>()
+            .WithBucketNamePrefix("test-")
+            .WithBucketNameSuffix("-1");
+
+        using var sp = services.BuildServiceProvider();
+        var storage = sp.GetRequiredService<MediaStorage>();
+
+        Assert.Equal("test-photos-1", storage.Photos.Name);
+        Assert.Equal("test-videos-1", storage.Videos.Name);
+    }
+
+    [Fact]
+    public void DuplicateMetadataAcrossContexts_ContextsWork_BareBucketThrows()
+    {
+        var services = new ServiceCollection();
+        services.AddFakeObjectStorage<MediaStorage>();
+        services.AddFakeObjectStorage<MirrorStorage>().WithBucketName("photos", "mirror");
+
+        using var sp = services.BuildServiceProvider();
+
+        Assert.Equal("photos", sp.GetRequiredService<MediaStorage>().Photos.Name);
+        Assert.Equal("mirror", sp.GetRequiredService<MirrorStorage>().Photos.Name);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => sp.GetRequiredService<IObjectBucket<PhotoMetadata>>());
+        Assert.Contains(nameof(MirrorStorage), ex.Message);
+        Assert.Contains(nameof(MediaStorage), ex.Message);
+    }
+
+    [Fact]
+    public void WithBucketName_AfterContextResolved_Throws()
+    {
+        var services = new ServiceCollection();
+        var builder = services.AddFakeObjectStorage<MediaStorage>();
+
+        using var sp = services.BuildServiceProvider();
+        _ = sp.GetRequiredService<MediaStorage>();
+
+        var ex = Assert.Throws<InvalidOperationException>(() => builder.WithBucketName("Photos", "late"));
+        Assert.Contains(nameof(MediaStorage), ex.Message);
+        Assert.Throws<InvalidOperationException>(() => builder.WithBucketNamePrefix("late-"));
+        Assert.Throws<InvalidOperationException>(() => builder.WithBucketNameSuffix("-late"));
+    }
+
+    [Fact]
+    public async Task EnsureBucketsAsync_CreatesMissingBucketsOnce()
+    {
+        var services = new ServiceCollection();
+        var builder = services.AddFakeObjectStorage<MediaStorage>();
+
+        using var sp = services.BuildServiceProvider();
+        var storage = sp.GetRequiredService<MediaStorage>();
+
+        Assert.False(await storage.Photos.ExistsAsync());
+
+        await storage.EnsureBucketsAsync(s => s.Versioning = BucketVersioning.Enabled);
+
+        Assert.True(await storage.Photos.ExistsAsync());
+        Assert.True(await storage.Videos.ExistsAsync());
+        Assert.Equal(BucketVersioning.Enabled, (await storage.Photos.GetSettingsAsync()).Versioning);
+        Assert.Equal(2, builder.Store.GetBucketNames().Count);
+
+        // Idempotent: an existing bucket is left alone instead of being re-created.
+        await storage.EnsureBucketsAsync();
+        Assert.Equal(2, builder.Store.GetBucketNames().Count);
+    }
+
+    [Fact]
+    public async Task EnsureBucketsAsync_OnlyDeclaredBuckets()
+    {
+        var services = new ServiceCollection();
+        var builder = services.AddFakeObjectStorage<MediaStorage>()
+            .ConfigureBucket("videos", s => s.Versioning = BucketVersioning.Enabled);
+
+        using var sp = services.BuildServiceProvider();
+        var storage = sp.GetRequiredService<MediaStorage>();
+
+        await storage.EnsureBucketsAsync();
+
+        Assert.Equal(["videos"], builder.Store.GetBucketNames());
+        Assert.Equal(BucketVersioning.Enabled, (await storage.Videos.GetSettingsAsync()).Versioning);
+        Assert.False(await storage.Photos.ExistsAsync());
+    }
+
+    [Fact]
+    public async Task EnsureBucketsAsync_MixedCaseConfiguredName_SettingsStillApply()
+    {
+        // Bucket names are lowercased by the mapping layer while settings are keyed by the configured
+        // (mixed-case) name — the lookup must survive the case difference.
+        var services = new ServiceCollection();
+        services.AddFakeObjectStorage<MediaStorage>()
+            .WithBucketName("photos", "Prod-Photos")
+            .ConfigureBucket("photos", s => s.Versioning = BucketVersioning.Enabled);
+
+        using var sp = services.BuildServiceProvider();
+        var storage = sp.GetRequiredService<MediaStorage>();
+
+        await storage.EnsureBucketsAsync();
+
+        Assert.Equal("prod-photos", storage.Photos.Name);
+        Assert.True(await storage.Photos.ExistsAsync());
+        Assert.Equal(BucketVersioning.Enabled, (await storage.Photos.GetSettingsAsync()).Versioning);
+    }
+
+    [Fact]
+    public void ConfigureBucket_UnknownKey_Throws()
+    {
+        var services = new ServiceCollection();
+        var builder = services.AddFakeObjectStorage<MediaStorage>();
+
+        var ex = Assert.Throws<InvalidOperationException>(() => builder.ConfigureBucket("unknown", _ => { }));
+        Assert.Contains("photos", ex.Message);
+    }
+
+    [Fact]
+    public async Task EnsureBucketsAsync_TwoPropertiesOneBucket_CreatedOnce()
+    {
+        var services = new ServiceCollection();
+        var builder = services.AddFakeObjectStorage<MediaStorage>()
+            .WithBucketName("photos", "media/photos")
+            .WithBucketName("videos", "media/videos")
+            .ConfigureBucket("photos", _ => { });
+
+        using var sp = services.BuildServiceProvider();
+        var storage = sp.GetRequiredService<MediaStorage>();
+
+        await storage.EnsureBucketsAsync();
+
+        Assert.Equal(["media"], builder.Store.GetBucketNames());
+    }
+
+    [Fact]
+    public void SeparateContexts_HaveSeparateStores()
+    {
+        var services = new ServiceCollection();
+        var media = services.AddFakeObjectStorage<MediaStorage>();
+        var report = services.AddFakeObjectStorage<ReportStorage>();
+
+        Assert.NotSame(media.Store, report.Store);
+    }
+
+    public class PhotoMetadata : IObjectMetadata
+    {
+        public string? FileName { get; set; }
+    }
+
+    public class VideoMetadata : IObjectMetadata { }
+
+    public class ReportMetadata : IObjectMetadata { }
+
+    public class MediaStorage : ObjectStorageContext
+    {
+        [Bucket("photos")]
+        public IObjectBucket<PhotoMetadata> Photos { get; private set; } = null!;
+
+        [Bucket("videos")]
+        public IObjectBucket<VideoMetadata> Videos { get; private set; } = null!;
+    }
+
+    public class MirrorStorage : ObjectStorageContext
+    {
+        [Bucket("photos")]
+        public IObjectBucket<PhotoMetadata> Photos { get; private set; } = null!;
+    }
+
+    public class ReportStorage : ObjectStorageContext
+    {
+        [Bucket("reports")]
+        public IObjectBucket<ReportMetadata> Reports { get; private set; } = null!;
+    }
+}

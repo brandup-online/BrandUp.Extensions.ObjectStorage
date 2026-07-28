@@ -4,10 +4,10 @@ namespace BrandUp.Extensions.ObjectStorage;
 
 public static class ObjectStorageJsonExtensions
 {
-    #region IObjectStorage
+    #region IObjectStorageContext
 
     public static async Task<TContent?> ReadJsonAsync<TMetadata, TContent>(
-        this IObjectStorage storage,
+        this IObjectStorageContext storage,
         Guid objectId,
         JsonSerializerOptions? options = null,
         CancellationToken cancellationToken = default)
@@ -24,7 +24,7 @@ public static class ObjectStorageJsonExtensions
     }
 
     public static async Task<ObjectItem<TMetadata>> UploadJsonAsync<TMetadata, TContent>(
-        this IObjectStorage storage,
+        this IObjectStorageContext storage,
         Guid objectId,
         TMetadata metadata,
         TContent content,

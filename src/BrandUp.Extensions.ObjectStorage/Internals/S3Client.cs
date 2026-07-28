@@ -3,7 +3,6 @@ using System.Text.RegularExpressions;
 using Amazon.Runtime;
 using Amazon.S3;
 using Amazon.S3.Model;
-using Microsoft.Extensions.Options;
 using S3LifecycleRule = Amazon.S3.Model.LifecycleRule;
 
 namespace BrandUp.Extensions.ObjectStorage.Internals;
@@ -14,12 +13,11 @@ internal class S3Client : IS3Client, IDisposable
 
     readonly AmazonS3Client _s3;
 
-    // credentialsProvider is injected via DI default-value binding: present only when registered through
-    // ObjectStorageBuilder.UseCredentialsProvider, otherwise null (static or session-token credentials).
-    public S3Client(IOptions<ObjectStorageOptions> options, IObjectStorageCredentialsProvider? credentialsProvider = null)
+    // Created per connection by S3ClientFactory; credentialsProvider is the one registered for that connection
+    // (null for static or session-token credentials).
+    public S3Client(ObjectStorageOptions opts, IObjectStorageCredentialsProvider? credentialsProvider = null)
     {
-        ArgumentNullException.ThrowIfNull(options);
-        var opts = options.Value;
+        ArgumentNullException.ThrowIfNull(opts);
 
         // Built once: a RefreshingAWSCredentials renews temp creds in place, so the singleton client is never recreated.
         _s3 = new AmazonS3Client(CreateCredentials(opts, credentialsProvider), new AmazonS3Config
@@ -230,7 +228,8 @@ internal class S3Client : IS3Client, IDisposable
         }
         catch (AmazonS3Exception ex)
         {
-            throw new ObjectStorageException(ex.Message, ex.StatusCode, ex);
+            // Error code is carried over so callers can tell "already exists" from other conflicts.
+            throw new ObjectStorageException(ex.Message, ex.StatusCode, ex.ErrorCode, ex);
         }
     }
 

@@ -1,6 +1,6 @@
 namespace BrandUp.Extensions.ObjectStorage.Internals;
 
-internal class S3ObjectStorage(IObjectStorageClient client) : IObjectStorage
+internal class S3ObjectStorage(IObjectStorageClient client) : IObjectStorageContext
 {
     public Task<ObjectItem<TMetadata>?> FindAsync<TMetadata>(Guid objectId, CancellationToken cancellationToken = default)
         where TMetadata : class, IObjectMetadata

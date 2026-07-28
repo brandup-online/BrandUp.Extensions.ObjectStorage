@@ -11,7 +11,7 @@
     <Authors>Dmitry Kovyazin</Authors>
     <Company>BrandUp</Company>
     <Title>BrandUp.Extensions.ObjectStorage.Abstraction</Title>
-    <Description>Abstractions for S3-compatible object storage: IObjectStorage, IObjectStorageClient, IObjectBucket, BucketSettings and JSON extension methods. No dependency on AWS SDK.</Description>
+    <Description>Abstractions for S3-compatible object storage: IObjectStorageContext, IObjectStorageClient, IObjectBucket, BucketSettings and JSON extension methods. No dependency on AWS SDK.</Description>
     <PackageTags>s3;objectstorage;abstractions;cloud;storage;yandexcloud</PackageTags>
     <PackageProjectUrl>https://github.com/brandup/BrandUp.Extensions.ObjectStorage</PackageProjectUrl>
     <PackageReadmeFile>README.md</PackageReadmeFile>
@@ -23,6 +23,15 @@
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="\" />
     <None Include="..\..\icon.png" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Storage-context model building is shared infrastructure of the implementation packages. -->
+    <InternalsVisibleTo Include="BrandUp.Extensions.ObjectStorage" />
+    <InternalsVisibleTo Include="BrandUp.Extensions.ObjectStorage.Testing" />
+    <InternalsVisibleTo Include="BrandUp.Extensions.ObjectStorage.Abstraction.Tests" />
+    <InternalsVisibleTo Include="BrandUp.Extensions.ObjectStorage.Tests" />
+    <InternalsVisibleTo Include="BrandUp.Extensions.ObjectStorage.Testing.Tests" />
   </ItemGroup>
 
 </Project>

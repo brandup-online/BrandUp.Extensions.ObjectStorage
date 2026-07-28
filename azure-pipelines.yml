@@ -23,7 +23,7 @@ variables:
   - name: envName
     value: "brandup-extensions-objectstorage"
   - name: version-major
-    value: "1"
+    value: "2"
   - name: version-minor
     value: "0"
 

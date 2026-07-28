@@ -1,16 +1,21 @@
-using Microsoft.Extensions.Options;
-
 namespace BrandUp.Extensions.ObjectStorage.Internals;
 
+/// <summary>
+/// Client of a single connection with its own set of typed mappings. Contexts sharing a connection get their
+/// own client instance (cheap) over the shared <see cref="IS3Client"/>.
+/// </summary>
 internal class S3ObjectStorageClient : IObjectStorageClient
 {
     readonly IS3Client _s3;
     readonly Dictionary<Type, ObjectMapping> _mappings = [];
 
-    public S3ObjectStorageClient(IS3Client s3, IOptions<ObjectStorageMappingsOptions> mappingsOptions)
+    public S3ObjectStorageClient(IS3Client s3, IReadOnlyDictionary<Type, string> destinations)
     {
+        ArgumentNullException.ThrowIfNull(s3);
+        ArgumentNullException.ThrowIfNull(destinations);
+
         _s3 = s3;
-        foreach (var (type, destination) in mappingsOptions.Value.Destinations)
+        foreach (var (type, destination) in destinations)
             _mappings[type] = ObjectMapping.Create(type, destination);
     }
 

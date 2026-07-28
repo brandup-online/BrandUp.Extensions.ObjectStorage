@@ -1,3 +1,5 @@
+using System.Net;
+
 namespace BrandUp.Extensions.ObjectStorage;
 
 public class FakeObjectStorageClient(FakeObjectStore store) : IObjectStorageClient
@@ -6,7 +8,11 @@ public class FakeObjectStorageClient(FakeObjectStore store) : IObjectStorageClie
 
     public void AddMapping<TMetadata>(string destination)
         where TMetadata : class, IObjectMetadata
+        => AddMapping(typeof(TMetadata), destination);
+
+    public void AddMapping(Type metadataType, string destination)
     {
+        ArgumentNullException.ThrowIfNull(metadataType);
         ArgumentException.ThrowIfNullOrWhiteSpace(destination);
         destination = destination.Trim().Trim('/').ToLower();
 
@@ -14,7 +20,7 @@ public class FakeObjectStorageClient(FakeObjectStore store) : IObjectStorageClie
         var bucketName = slash == -1 ? destination : destination[..slash];
         var prefix = slash == -1 ? null : destination[(slash + 1)..];
 
-        _mappings[typeof(TMetadata)] = (bucketName, prefix);
+        _mappings[metadataType] = (bucketName, prefix);
     }
 
     public IObjectBucket GetBucket(string bucketName)
@@ -42,7 +48,16 @@ public class FakeObjectStorageClient(FakeObjectStore store) : IObjectStorageClie
 
         var settings = new BucketSettings();
         configure?.Invoke(settings);
-        store.CreateBucket(bucketName.ToLower(), settings);
+
+        try
+        {
+            store.CreateBucket(bucketName.ToLower(), settings);
+        }
+        catch (InvalidOperationException e)
+        {
+            // Same shape as a real provider, so callers can handle the duplicate the same way in tests.
+            throw new ObjectStorageException(e.Message, HttpStatusCode.Conflict, "BucketAlreadyOwnedByYou", e);
+        }
 
         return Task.CompletedTask;
     }

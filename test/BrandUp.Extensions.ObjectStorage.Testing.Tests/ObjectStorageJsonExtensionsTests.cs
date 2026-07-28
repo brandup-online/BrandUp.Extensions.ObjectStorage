@@ -5,7 +5,7 @@ namespace BrandUp.Extensions.ObjectStorage;
 
 public class ObjectStorageJsonExtensionsTests
 {
-    readonly IObjectStorage _storage;
+    readonly IObjectStorageContext _storage;
     readonly IObjectBucket<ReportMetadata> _bucket;
 
     public ObjectStorageJsonExtensionsTests()
@@ -16,11 +16,11 @@ public class ObjectStorageJsonExtensionsTests
             .WithBucket("reports");
 
         var sp = services.BuildServiceProvider();
-        _storage = sp.GetRequiredService<IObjectStorage>();
+        _storage = sp.GetRequiredService<IObjectStorageContext>();
         _bucket  = sp.GetRequiredService<IObjectBucket<ReportMetadata>>();
     }
 
-    // IObjectStorage tests
+    // IObjectStorageContext tests
 
     [Fact]
     public async Task Storage_UploadJson_ReadJson_RoundTrip()

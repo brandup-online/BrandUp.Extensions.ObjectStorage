@@ -93,5 +93,31 @@ public class MinioStorageTests(MinioFixture fixture) : IClassFixture<MinioFixtur
         Assert.Null(await bucket.FindOneAsync(Guid.NewGuid()));
     }
 
+    [MinioFact]
+    public async Task Context_BucketNameFromConfiguration_RoundTrip()
+    {
+        var context = fixture.Context;
+        Assert.Equal(fixture.BucketName, context.Files.Name);
+        Assert.True(await context.Files.ExistsAsync());
+
+        var id = Guid.NewGuid();
+        var payload = Encoding.UTF8.GetBytes("hello context");
+
+        await context.Files.UploadAsync(id, new ContextFileMetadata { FileName = "ctx.txt" }, new MemoryStream(payload));
+        try
+        {
+            var found = await context.Files.FindOneAsync(id);
+            Assert.NotNull(found);
+            Assert.Equal("ctx.txt", found!.Metadata.FileName);
+
+            // Same bucket as the mapping-based tests, separated by the declared key prefix.
+            Assert.Null(await fixture.Client.GetBucket<TestFileMetadata>().FindOneAsync(id));
+        }
+        finally
+        {
+            await context.Files.DeleteOneAsync(id);
+        }
+    }
+
     private record Payload(int Number, string Text);
 }

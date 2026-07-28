@@ -22,7 +22,7 @@ public class ServiceCollectionExtensionsTests
     public void AddObjectStorage_RegistersIObjectStorage()
     {
         var sp = BuildProvider();
-        Assert.NotNull(sp.GetService<IObjectStorage>());
+        Assert.NotNull(sp.GetService<IObjectStorageContext>());
     }
 
     [Fact]

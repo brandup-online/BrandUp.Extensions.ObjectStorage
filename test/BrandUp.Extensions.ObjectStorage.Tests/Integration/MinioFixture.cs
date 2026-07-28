@@ -4,7 +4,7 @@ namespace BrandUp.Extensions.ObjectStorage.Integration;
 
 /// <summary>
 /// Shared per-class fixture for MinIO integration tests. Builds an <see cref="IObjectStorageClient"/> /
-/// <see cref="IObjectStorage"/> against the MinIO endpoint from the environment, and provisions a single
+/// <see cref="IObjectStorageContext"/> against the MinIO endpoint from the environment, and provisions a single
 /// throwaway bucket (mapped to <see cref="TestFileMetadata"/>) that is dropped on teardown. When MinIO is
 /// not configured initialization is a no-op — all tests are skipped via <see cref="MinioFactAttribute"/>.
 /// </summary>
@@ -22,7 +22,11 @@ public sealed class MinioFixture : IAsyncLifetime
     public IObjectStorageClient Client => _provider?.GetRequiredService<IObjectStorageClient>()
         ?? throw new InvalidOperationException("MinIO is not configured.");
 
-    public IObjectStorage Storage => _provider?.GetRequiredService<IObjectStorage>()
+    public IObjectStorageContext Storage => _provider?.GetRequiredService<IObjectStorageContext>()
+        ?? throw new InvalidOperationException("MinIO is not configured.");
+
+    /// <summary>Typed storage context over the same throwaway bucket, whose name it takes from configuration.</summary>
+    public MinioStorageContext Context => _provider?.GetRequiredService<MinioStorageContext>()
         ?? throw new InvalidOperationException("MinIO is not configured.");
 
     public async Task InitializeAsync()
@@ -40,9 +44,23 @@ public sealed class MinioFixture : IAsyncLifetime
             o.ForcePathStyle = true; // MinIO does not support virtual-hosted-style addressing
         }).AddMapping<TestFileMetadata>(BucketName);
 
+        services.AddObjectStorage<MinioStorageContext>(o =>
+        {
+            o.ServiceUrl = MinioEnvironment.ServiceUrl;
+            o.AuthenticationRegion = MinioEnvironment.Region;
+            o.AccessKeyId = MinioEnvironment.AccessKey;
+            o.SecretAccessKey = MinioEnvironment.SecretKey;
+            o.ForcePathStyle = true;
+            // Bucket name is known only at run time; the object key prefix comes from configuration as well.
+            o.Objects["Files"] = $"{BucketName}/ctx";
+        })
+        // Empty settings mean "this bucket is ours, create it with defaults".
+        .ConfigureBucket<ContextFileMetadata>(_ => { });
+
         _provider = services.BuildServiceProvider();
 
-        await Client.CreateBucketAsync(BucketName);
+        // Provisioning through the context: names come from configuration, so they are not repeated here.
+        await Context.EnsureBucketsAsync();
     }
 
     public async Task DisposeAsync()
@@ -68,4 +86,20 @@ public class TestFileMetadata : IObjectMetadata
 {
     public string? FileName { get; set; }
     public string? ContentType { get; set; }
+}
+
+/// <summary>Metadata of the context-based integration tests; separate type so both mappings coexist.</summary>
+public class ContextFileMetadata : IObjectMetadata
+{
+    public string? FileName { get; set; }
+}
+
+/// <summary>
+/// Storage context whose bucket is not declared in code: <c>[Bucket]</c> only names the configuration key
+/// (here the property name), and the bucket itself comes from <see cref="ObjectStorageOptions.Objects"/>.
+/// </summary>
+public class MinioStorageContext : ObjectStorageContext
+{
+    [Bucket]
+    public IObjectBucket<ContextFileMetadata> Files { get; private set; } = null!;
 }

@@ -1,6 +1,6 @@
 namespace BrandUp.Extensions.ObjectStorage;
 
-public class FakeObjectStorage(FakeObjectStorageClient client) : IObjectStorage
+public class FakeObjectStorage(FakeObjectStorageClient client) : IObjectStorageContext
 {
     public Task<ObjectItem<TMetadata>?> FindAsync<TMetadata>(Guid objectId, CancellationToken cancellationToken = default)
         where TMetadata : class, IObjectMetadata
