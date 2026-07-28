@@ -29,13 +29,38 @@ internal class S3ObjectBucket(string name, IS3Client client) : IObjectBucket
     {
         ArgumentNullException.ThrowIfNull(configure);
 
-        var settings = await GetSettingsAsync(cancellationToken);
-        configure(settings);
+        var current = await GetSettingsAsync(cancellationToken);
+        var desired = new BucketSettings
+        {
+            Versioning = current.Versioning,
+            Access = current.Access,
+            LifecycleRules = [.. current.LifecycleRules]
+        };
+        configure(desired);
 
-        await Task.WhenAll(
-            Client.SetVersioningAsync(Name, settings.Versioning, cancellationToken),
-            Client.SetAccessAsync(Name, settings.Access, cancellationToken),
-            Client.SetLifecycleAsync(Name, settings.LifecycleRules, cancellationToken));
+        await WriteChangedAsync(Client, Name, current, desired, cancellationToken);
+    }
+
+    /// <summary>
+    /// Writes only the settings that differ between <paramref name="current"/> and <paramref name="desired"/>.
+    /// Untouched aspects cost no requests — and providers that do not support one of them (MinIO rejects
+    /// bucket ACL grants) are not hit unless the caller actually changes it.
+    /// </summary>
+    internal static Task WriteChangedAsync(
+        IS3Client client, string bucketName, BucketSettings current, BucketSettings desired, CancellationToken cancellationToken)
+    {
+        var writes = new List<Task>(3);
+
+        if (desired.Versioning != current.Versioning)
+            writes.Add(client.SetVersioningAsync(bucketName, desired.Versioning, cancellationToken));
+
+        if (desired.Access != current.Access)
+            writes.Add(client.SetAccessAsync(bucketName, desired.Access, cancellationToken));
+
+        if (!desired.LifecycleRules.SequenceEqual(current.LifecycleRules))
+            writes.Add(client.SetLifecycleAsync(bucketName, desired.LifecycleRules, cancellationToken));
+
+        return writes.Count > 0 ? Task.WhenAll(writes) : Task.CompletedTask;
     }
 }
 

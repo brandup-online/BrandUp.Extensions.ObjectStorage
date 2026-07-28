@@ -54,8 +54,15 @@ internal class S3ObjectStorageClient : IObjectStorageClient
 
         await _s3.CreateBucketAsync(bucketName, cancellationToken);
 
-        if (configure != null)
-            await GetBucket(bucketName).UpdateSettingsAsync(configure, cancellationToken);
+        if (configure is null)
+            return;
+
+        // A fresh bucket has the service defaults, so nothing needs to be read back: apply the delegate to the
+        // defaults and write only what it actually changed (an empty delegate writes nothing at all).
+        var desired = new BucketSettings();
+        configure(desired);
+
+        await S3ObjectBucket.WriteChangedAsync(_s3, bucketName, new BucketSettings(), desired, cancellationToken);
     }
 
     public Task DropBucketAsync(string bucketName, CancellationToken cancellationToken = default)

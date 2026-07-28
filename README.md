@@ -552,6 +552,8 @@ services.AddObjectStorage(opts =>
 
 MinIO не поддерживает virtual-hosted адресацию, поэтому обязателен `ForcePathStyle = true`.
 
+MinIO также не поддерживает bucket ACL (`PutBucketAcl` с grant-заголовками): явная установка `Access` завершится ошибкой. Настройки бакетов пишутся только при реальном изменении, поэтому пока `Access` не трогается — запрос ACL не отправляется и всё работает.
+
 ```csharp
 services.AddObjectStorage(opts =>
 {
