@@ -288,6 +288,57 @@ await media.Photos.UpdateSettingsAsync(s =>
 
 Имена резолвятся при создании контекста, поэтому корректность настроенного значения проверяется тогда же — с указанием контекста, свойства и ключа конфигурации. То же работает и для подключения по умолчанию: `AddMapping<T>("legacy/items")` объявляет бакет `legacy`, а `Objects["legacy"]` подменяет его физическое имя.
 
+### Типизированные ключи объектов
+
+По умолчанию объект идентифицируется `Guid`. Тип ключа можно задать вторым параметром `IObjectBucket<TMetadata, TKey>` — прямо типом свойства контекста:
+
+```csharp
+public class DocumentStorage : ObjectStorageContext
+{
+    [Bucket] public IObjectBucket<PhotoMetadata> Photos { get; private set; } = null!;             // Guid, как раньше
+    [Bucket] public IObjectBucket<PageMetadata, string> Pages { get; private set; } = null!;       // строковый ключ
+    [Bucket] public IObjectBucket<InvoiceMetadata, long> Invoices { get; private set; } = null!;   // числовой
+    [Bucket] public IObjectBucket<ReportMetadata, ReportKey> Reports { get; private set; } = null!; // структурный
+}
+
+await storage.Pages.UploadAsync("landing/index", metadata, stream);
+var invoice = await storage.Invoices.FindOneAsync(20260728001);
+```
+
+Поддерживаемые типы ключа: `Guid` (сериализуется как раньше — формат `d`, существующие данные читаются), `string`, `int`, `long` и любой тип, реализующий `IObjectKey`. Неподдерживаемый тип — ошибка на этапе регистрации контекста.
+
+#### Структурные ключи: `ObjectKey`
+
+Для ключей, собираемых из нескольких значений, есть базовый класс `ObjectKey`: строка ключа формируется из публичных свойств, расширение файла подставляется автоматически:
+
+```csharp
+[ObjectKeyFormat("{UserId}/{CreatedOn:yyyy/MM}/{Number}", Extension = ".json")]
+public sealed class ReportKey : ObjectKey
+{
+    public Guid UserId { get; init; }
+    public DateOnly CreatedOn { get; init; }
+    public int Number { get; init; }
+}
+
+var key = new ReportKey { UserId = userId, CreatedOn = new(2026, 7, 28), Number = 7 };
+// key.ToKeyString() -> "1f0f.../2026/07/7.json"
+await storage.Reports.UploadJsonAsync(key, metadata, content);
+```
+
+Правила:
+
+- без атрибута свойства соединяются через `/` в порядке объявления;
+- шаблон — плейсхолдеры `{Свойство}` или `{Свойство:формат}` (формат инвариантный; `Guid` по умолчанию `d`);
+- `Extension` добавляется в конец, точка в начале необязательна; не задан — не добавляется ничего;
+- свойство со значением `null` или ключ без единого свойства — ошибка;
+- ключи сравниваются по типу и итоговой строке (`Equals`/`GetHashCode` переопределены).
+
+Строковые и структурные ключи валидируются **до обращения к хранилищу**: ключ должен быть непустым, без управляющих символов и без символов из списка AWS «characters to avoid» (`` \ { } ^ % ` [ ] " < > ~ # | ``). Пробелы, юникод и прочие допустимые в S3 символы не ограничиваются. `Guid`, `int` и `long` безопасны по построению и не проверяются.
+
+Для нестандартной сериализации реализуйте `IObjectKey` напрямую — единственный метод `ToKeyString()`.
+
+`Bucket<TMetadata, TKey>()`, generic-перегрузки `FindAsync`/`ReadAsync`/`UploadAsync`/`DeleteAsync` на контексте и JSON-расширения работают с типизированными ключами; типизированный бакет также регистрируется в DI (`IObjectBucket<PageMetadata, string>`).
+
 ### Обратная совместимость
 
 `AddObjectStorage(opts => …)` + `AddMapping<T>(...)` продолжает работать как раньше: это подключение по умолчанию с безымянными `IObjectStorageClient`, `IObjectStorageContext` и `IObjectBucket<T>`. Его можно комбинировать с контекстами в одном приложении. Для контекстов безымянные `IObjectStorageClient`/`IObjectStorageContext` не регистрируются — используйте сам контекст и его `Client`.
@@ -325,16 +376,16 @@ await bucket.UpdateSettingsAsync(s =>
 });
 ```
 
-### `IObjectBucket<TMetadata>`
+### `IObjectBucket<TMetadata>` / `IObjectBucket<TMetadata, TKey>`
 
-Типизированные CRUD-операции, аналог `IMongoCollection<T>`. Наследует `IObjectBucket`.
+Типизированные CRUD-операции, аналог `IMongoCollection<T>`. Наследует `IObjectBucket`; `IObjectBucket<TMetadata>` — частный случай с ключом `Guid` (наследует `IObjectBucket<TMetadata, Guid>`). Типы ключа — см. [Типизированные ключи объектов](#типизированные-ключи-объектов).
 
 | Метод | Описание |
 |---|---|
-| `FindOneAsync(Guid, CancellationToken)` | Метаданные объекта. `null` если не найден. |
-| `OpenReadAsync(Guid, CancellationToken)` | Поток содержимого. `null` если не найден. |
-| `UploadAsync(Guid, TMetadata, Stream, CancellationToken)` | Загрузить объект. |
-| `DeleteOneAsync(Guid, CancellationToken)` | Удалить объект. `false` если не существовал. |
+| `FindOneAsync(TKey, CancellationToken)` | Метаданные объекта. `null` если не найден. |
+| `OpenReadAsync(TKey, CancellationToken)` | Поток содержимого. `null` если не найден. |
+| `UploadAsync(TKey, TMetadata, Stream, CancellationToken)` | Загрузить объект. |
+| `DeleteOneAsync(TKey, CancellationToken)` | Удалить объект. `false` если не существовал. |
 
 ### `IObjectStorageContext`
 
@@ -354,12 +405,15 @@ await bucket.UpdateSettingsAsync(s =>
 | Член | Описание |
 |---|---|
 | `Client` | `IObjectStorageClient` подключения контекста — управление бакетами того же аккаунта. Принимает **физические** имена, резолв ключей к нему не применяется. |
-| `Bucket<TMetadata>()` | Бакет по типу метаданных. |
+| `Bucket<TMetadata>()` | Бакет по типу метаданных (ключ `Guid`). |
+| `Bucket<TMetadata, TKey>()` | Бакет с типизированным ключом; несоответствие объявленному типу ключа — исключение. |
 | `Bucket(Type)` | То же без дженерика. |
 | `Buckets` | Все бакеты контекста. |
 | `EnsureBucketsAsync(configure?, ct)` | Создаёт недостающие бакеты, для которых объявлены настройки (`ConfigureBucket` или секция `Buckets`); остальные не трогает, существующие не переконфигурирует. `configure` накладывается поверх и включает все бакеты контекста. Гонку с параллельным провижинингом (409 «бакет уже существует») проглатывает. См. [Настройки создаваемых бакетов](#настройки-создаваемых-бакетов). |
 
-`[Bucket(key = null)]` на свойстве `IObjectBucket<TMetadata>` объявляет бакет: `key` — ключ конфигурации, по которому берутся имя бакета и префикс ключей объектов (по умолчанию — имя свойства). См. [Имена бакетов из конфигурации](#имена-бакетов-из-конфигурации).
+`[Bucket(key = null)]` на свойстве `IObjectBucket<TMetadata>` или `IObjectBucket<TMetadata, TKey>` объявляет бакет: `key` — ключ конфигурации, по которому берутся имя бакета и префикс ключей объектов (по умолчанию — имя свойства). См. [Имена бакетов из конфигурации](#имена-бакетов-из-конфигурации).
+
+Generic-перегрузки фасада с типизированным ключом (`FindAsync<TMetadata, TKey>(TKey)` и т.д.) доступны на классе контекста.
 
 ### `ObjectStorageOptions`
 

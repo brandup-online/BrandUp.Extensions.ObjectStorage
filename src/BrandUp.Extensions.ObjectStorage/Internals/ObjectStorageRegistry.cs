@@ -11,10 +11,13 @@ internal sealed class ObjectStorageRegistry
     /// <summary>Owner of the mappings registered through the connection-level <see cref="ObjectStorageBuilder"/>.</summary>
     public static readonly Type DefaultOwner = typeof(ObjectStorageBuilder);
 
+    static readonly IReadOnlyDictionary<string, Action<BucketSettings>> EmptyBucketSettings =
+        new Dictionary<string, Action<BucketSettings>>();
+
     readonly HashSet<string> _connections = [];
     readonly HashSet<string> _credentialsProviders = [];
     readonly Dictionary<Type, string> _contexts = [];
-    readonly Dictionary<Type, Type> _metadataOwners = [];
+    readonly MetadataOwners _metadataOwners = new();
     readonly Dictionary<Type, Dictionary<string, Action<BucketSettings>>> _bucketSettings = [];
 
     public IReadOnlyCollection<string> Connections => _connections;
@@ -37,23 +40,9 @@ internal sealed class ObjectStorageRegistry
         _contexts[contextType] = connectionName;
     }
 
-    /// <summary>
-    /// Claims <paramref name="metadataType"/> for <paramref name="owner"/>. Returns <see langword="false"/> when
-    /// another owner already claimed it — the metadata type is then reachable only through its context, because
-    /// a bare <c>IObjectBucket&lt;TMetadata&gt;</c> registration would be ambiguous.
-    /// </summary>
+    /// <inheritdoc cref="MetadataOwners.Claim"/>
     public bool ClaimMetadata(Type metadataType, Type owner, out Type currentOwner)
-    {
-        if (_metadataOwners.TryGetValue(metadataType, out var existing))
-        {
-            currentOwner = existing;
-            return existing == owner;
-        }
-
-        _metadataOwners[metadataType] = owner;
-        currentOwner = owner;
-        return true;
-    }
+        => _metadataOwners.Claim(metadataType, owner, out currentOwner);
 
     /// <summary>
     /// Settings declared in code for a bucket of a context, by configuration key. Several calls for one key
@@ -68,9 +57,7 @@ internal sealed class ObjectStorageRegistry
     }
 
     public IReadOnlyDictionary<string, Action<BucketSettings>> GetBucketSettings(Type contextType)
-        => _bucketSettings.TryGetValue(contextType, out var byKey)
-            ? byKey
-            : new Dictionary<string, Action<BucketSettings>>();
+        => _bucketSettings.TryGetValue(contextType, out var byKey) ? byKey : EmptyBucketSettings;
 
     public static string Display(string connectionName)
         => connectionName.Length == 0 ? "(default)" : connectionName;

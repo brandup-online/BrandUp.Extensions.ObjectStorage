@@ -1,3 +1,5 @@
+using BrandUp.Extensions.ObjectStorage.Internals;
+
 namespace BrandUp.Extensions.ObjectStorage;
 
 public class FakeObjectBucket(string name, FakeObjectStore store) : IObjectBucket
@@ -20,20 +22,23 @@ public class FakeObjectBucket(string name, FakeObjectStore store) : IObjectBucke
     }
 }
 
-public class FakeObjectBucket<TMetadata>(string name, string? prefix, FakeObjectStore store)
-    : FakeObjectBucket(name, store), IObjectBucket<TMetadata>
+public class FakeObjectBucket<TMetadata, TKey>(string name, string? prefix, FakeObjectStore store)
+    : FakeObjectBucket(name, store), IObjectBucket<TMetadata, TKey>
     where TMetadata : class, IObjectMetadata
+    where TKey : notnull
 {
-    public Task<ObjectItem<TMetadata>?> FindOneAsync(Guid objectId, CancellationToken cancellationToken = default)
+    readonly Func<TKey, string> _keySerializer = ObjectKeySerializer.Get<TKey>();
+
+    public Task<ObjectItem<TMetadata, TKey>?> FindOneAsync(TKey objectId, CancellationToken cancellationToken = default)
     {
         var obj = Store.GetObject(Name, GetKey(objectId));
         if (obj is null)
-            return Task.FromResult<ObjectItem<TMetadata>?>(null);
+            return Task.FromResult<ObjectItem<TMetadata, TKey>?>(null);
 
-        return Task.FromResult<ObjectItem<TMetadata>?>(ToItem(objectId, obj));
+        return Task.FromResult<ObjectItem<TMetadata, TKey>?>(CreateItem(objectId, obj));
     }
 
-    public Task<Stream?> OpenReadAsync(Guid objectId, CancellationToken cancellationToken = default)
+    public Task<Stream?> OpenReadAsync(TKey objectId, CancellationToken cancellationToken = default)
     {
         var obj = Store.GetObject(Name, GetKey(objectId));
         if (obj is null)
@@ -42,7 +47,7 @@ public class FakeObjectBucket<TMetadata>(string name, string? prefix, FakeObject
         return Task.FromResult<Stream?>(new MemoryStream(obj.Content, writable: false));
     }
 
-    public async Task<ObjectItem<TMetadata>> UploadAsync(Guid objectId, TMetadata metadata, Stream content, CancellationToken cancellationToken = default)
+    public async Task<ObjectItem<TMetadata, TKey>> UploadAsync(TKey objectId, TMetadata metadata, Stream content, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(metadata);
         ArgumentNullException.ThrowIfNull(content);
@@ -60,20 +65,39 @@ public class FakeObjectBucket<TMetadata>(string name, string? prefix, FakeObject
             bytes = ms.ToArray();
         }
 
-        Store.PutObject(Name, GetKey(objectId), bytes, metadata);
+        var key = GetKey(objectId);
+        Store.PutObject(Name, key, bytes, metadata);
 
-        return ToItem(objectId, Store.GetObject(Name, GetKey(objectId))!);
+        return CreateItem(objectId, Store.GetObject(Name, key)!);
     }
 
-    public Task<bool> DeleteOneAsync(Guid objectId, CancellationToken cancellationToken = default)
+    public Task<bool> DeleteOneAsync(TKey objectId, CancellationToken cancellationToken = default)
         => Task.FromResult(Store.DeleteObject(Name, GetKey(objectId)));
 
-    string GetKey(Guid objectId)
+    // private protected: the parameter type is internal, and only the in-assembly Guid subclass overrides it.
+    private protected virtual ObjectItem<TMetadata, TKey> CreateItem(TKey id, FakeStoredObject obj)
+        => new() { Id = id, Size = obj.Size, ETag = obj.ETag, Metadata = (TMetadata)obj.Metadata };
+
+    string GetKey(TKey objectId)
     {
-        var id = objectId.ToString("d");
+        ArgumentNullException.ThrowIfNull(objectId);
+
+        var id = _keySerializer(objectId);
         return prefix is null ? id : $"{prefix}_{id}";
     }
+}
 
-    static ObjectItem<TMetadata> ToItem(Guid id, FakeStoredObject obj)
-        => new() { Id = id, Size = obj.Size, ETag = obj.ETag, Metadata = (TMetadata)obj.Metadata };
+/// <summary>Guid-keyed fake bucket — the historic shape with <see cref="ObjectItem{TMetadata}"/> results.</summary>
+public class FakeObjectBucket<TMetadata>(string name, string? prefix, FakeObjectStore store)
+    : FakeObjectBucket<TMetadata, Guid>(name, prefix, store), IObjectBucket<TMetadata>
+    where TMetadata : class, IObjectMetadata
+{
+    private protected override ObjectItem<TMetadata, Guid> CreateItem(Guid id, FakeStoredObject obj)
+        => new ObjectItem<TMetadata> { Id = id, Size = obj.Size, ETag = obj.ETag, Metadata = (TMetadata)obj.Metadata };
+
+    public new async Task<ObjectItem<TMetadata>?> FindOneAsync(Guid objectId, CancellationToken cancellationToken = default)
+        => (ObjectItem<TMetadata>?)await base.FindOneAsync(objectId, cancellationToken);
+
+    public new async Task<ObjectItem<TMetadata>> UploadAsync(Guid objectId, TMetadata metadata, Stream content, CancellationToken cancellationToken = default)
+        => (ObjectItem<TMetadata>)await base.UploadAsync(objectId, metadata, content, cancellationToken);
 }

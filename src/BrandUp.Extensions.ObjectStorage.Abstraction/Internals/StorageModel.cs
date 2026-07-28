@@ -1,6 +1,6 @@
 using System.Collections.Concurrent;
+using System.Linq.Expressions;
 using System.Reflection;
-using System.Runtime.ExceptionServices;
 
 namespace BrandUp.Extensions.ObjectStorage.Internals;
 
@@ -11,40 +11,51 @@ namespace BrandUp.Extensions.ObjectStorage.Internals;
 /// </summary>
 internal sealed class StorageProperty
 {
-    static readonly MethodInfo GetBucketMethod = typeof(IObjectStorageClient)
+    static readonly MethodInfo GetBucketGuidMethod = typeof(IObjectStorageClient)
         .GetMethods(BindingFlags.Public | BindingFlags.Instance)
-        .Single(m => m.Name == nameof(IObjectStorageClient.GetBucket) && m.IsGenericMethodDefinition);
+        .Single(m => m.Name == nameof(IObjectStorageClient.GetBucket)
+            && m.IsGenericMethodDefinition && m.GetGenericArguments().Length == 1);
 
-    readonly MethodInfo _getBucket;
+    static readonly MethodInfo GetBucketTypedMethod = typeof(IObjectStorageClient)
+        .GetMethods(BindingFlags.Public | BindingFlags.Instance)
+        .Single(m => m.Name == nameof(IObjectStorageClient.GetBucket)
+            && m.IsGenericMethodDefinition && m.GetGenericArguments().Length == 2);
 
-    public StorageProperty(PropertyInfo property, Type metadataType, string configurationKey)
+    readonly Func<IObjectStorageClient, object> _getBucket;
+
+    public StorageProperty(PropertyInfo property, Type metadataType, Type keyType, string configurationKey)
     {
         Property = property;
         MetadataType = metadataType;
+        KeyType = keyType;
         ConfigurationKey = configurationKey;
-        _getBucket = GetBucketMethod.MakeGenericMethod(metadataType);
+
+        // Guid keys always use the richer historic shape (IObjectBucket<TMetadata> derives from
+        // IObjectBucket<TMetadata, Guid>, so it satisfies both property shapes); other keys use the
+        // two-argument overload. Compiled once, so client errors propagate without reflection wrappers.
+        var method = keyType == typeof(Guid)
+            ? GetBucketGuidMethod.MakeGenericMethod(metadataType)
+            : GetBucketTypedMethod.MakeGenericMethod(metadataType, keyType);
+
+        var client = Expression.Parameter(typeof(IObjectStorageClient), "client");
+        _getBucket = Expression.Lambda<Func<IObjectStorageClient, object>>(
+            Expression.Convert(Expression.Call(client, method), typeof(object)), client).Compile();
     }
 
     public PropertyInfo Property { get; }
     public Type MetadataType { get; }
 
+    /// <summary>Type of the object identifier of this bucket; <see cref="Guid"/> for the historic shape.</summary>
+    public Type KeyType { get; }
+
+    /// <summary>Exact interface of the property — the DI service type of the bucket.</summary>
+    public Type ServiceType => Property.PropertyType;
+
     /// <summary>Key the bucket is looked up by — the attribute value or the property name.</summary>
     public string ConfigurationKey { get; }
 
     /// <summary>Asks the client for the bucket serving <see cref="MetadataType"/>.</summary>
-    public object CreateBucket(IObjectStorageClient client)
-    {
-        try
-        {
-            return _getBucket.Invoke(client, null)!;
-        }
-        catch (TargetInvocationException e) when (e.InnerException is not null)
-        {
-            // Surface the client's own error instead of the reflection wrapper.
-            ExceptionDispatchInfo.Capture(e.InnerException).Throw();
-            throw;
-        }
-    }
+    public object CreateBucket(IObjectStorageClient client) => _getBucket(client);
 
     /// <summary>Assigns the bucket to the property; works with <c>init</c> and non-public setters.</summary>
     public void SetValue(object context, object bucket) => Property.SetValue(context, bucket);
@@ -95,6 +106,44 @@ internal sealed class StorageModel
         return destinations;
     }
 
+    /// <summary>Property by configuration key (case-insensitive); throws listing the known keys.</summary>
+    public StorageProperty RequireProperty(string configurationKey)
+        => Properties.FirstOrDefault(p => string.Equals(p.ConfigurationKey, configurationKey, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException(
+                $"Storage context {ContextType.Name} has no bucket with configuration key '{configurationKey}'. " +
+                $"Known keys: {string.Join(", ", Properties.Select(p => p.ConfigurationKey))}.");
+
+    /// <summary>Property by metadata type; throws when the context has no bucket for it.</summary>
+    public StorageProperty RequireProperty(Type metadataType)
+        => Properties.FirstOrDefault(p => p.MetadataType == metadataType)
+            ?? throw new InvalidOperationException(
+                $"Storage context {ContextType.Name} has no bucket for metadata type {metadataType.FullName}.");
+
+    /// <summary>
+    /// Re-keys per-configuration-key bucket settings by the physical bucket name of the resolved
+    /// destinations, composing the delegates when several keys share one bucket. The kernel shared by the
+    /// real registration and the Testing package.
+    /// </summary>
+    public IReadOnlyDictionary<string, Action<BucketSettings>> MapSettingsToBuckets(
+        IReadOnlyDictionary<Type, string> destinations,
+        IReadOnlyDictionary<string, Action<BucketSettings>> settingsByKey)
+    {
+        var result = new Dictionary<string, Action<BucketSettings>>(StringComparer.OrdinalIgnoreCase);
+        if (settingsByKey.Count == 0)
+            return result;
+
+        foreach (var property in Properties)
+        {
+            if (!settingsByKey.TryGetValue(property.ConfigurationKey, out var configure))
+                continue;
+
+            var bucketName = DestinationValidator.Split(destinations[property.MetadataType]).BucketName;
+            result[bucketName] = result.TryGetValue(bucketName, out var existing) ? existing + configure : configure;
+        }
+
+        return result;
+    }
+
     public static StorageModel Build(Type contextType)
     {
         ArgumentNullException.ThrowIfNull(contextType);
@@ -114,9 +163,11 @@ internal sealed class StorageModel
 
         foreach (var property in contextType.GetProperties(BindingFlags.Public | BindingFlags.Instance))
         {
-            var metadataType = GetBucketMetadataType(property.PropertyType);
-            if (metadataType is null)
+            var shape = GetBucketShape(property.PropertyType);
+            if (shape is null)
                 continue;
+
+            var (metadataType, keyType) = shape.Value;
 
             var attribute = property.GetCustomAttribute<BucketAttribute>()
                 ?? throw new InvalidOperationException(
@@ -137,16 +188,34 @@ internal sealed class StorageModel
             if (key.Length == 0)
                 throw new InvalidOperationException($"Configuration key of {location} cannot be empty.");
 
+            if (!ObjectKeySerializer.IsSupported(keyType))
+                throw new InvalidOperationException($"Bucket {location}: {ObjectKeySerializer.NotSupported(keyType).Message}");
+
             owners[metadataType] = property;
-            properties.Add(new StorageProperty(property, metadataType, key));
+            properties.Add(new StorageProperty(property, metadataType, keyType, key));
         }
 
         return new StorageModel(contextType, properties);
     }
 
-    /// <summary>Returns TMetadata when the property type is exactly <see cref="IObjectBucket{TMetadata}"/>.</summary>
-    static Type? GetBucketMetadataType(Type propertyType)
-        => propertyType.IsGenericType && propertyType.GetGenericTypeDefinition() == typeof(IObjectBucket<>)
-            ? propertyType.GetGenericArguments()[0]
-            : null;
+    /// <summary>
+    /// Returns (TMetadata, TKey) when the property type is exactly <see cref="IObjectBucket{TMetadata}"/>
+    /// (key = <see cref="Guid"/>) or <see cref="IObjectBucket{TMetadata, TKey}"/>.
+    /// </summary>
+    static (Type MetadataType, Type KeyType)? GetBucketShape(Type propertyType)
+    {
+        if (!propertyType.IsGenericType)
+            return null;
+
+        var definition = propertyType.GetGenericTypeDefinition();
+        var arguments = propertyType.GetGenericArguments();
+
+        if (definition == typeof(IObjectBucket<>))
+            return (arguments[0], typeof(Guid));
+
+        if (definition == typeof(IObjectBucket<,>))
+            return (arguments[0], arguments[1]);
+
+        return null;
+    }
 }

@@ -27,13 +27,23 @@ internal class S3ObjectStorageClient : IObjectStorageClient
 
     public IObjectBucket<TMetadata> GetBucket<TMetadata>()
         where TMetadata : class, IObjectMetadata
-    {
-        var type = typeof(TMetadata);
-        if (!_mappings.TryGetValue(type, out var mapping))
-            throw new InvalidOperationException($"No mapping configured for type {type.FullName}.");
+        => new S3ObjectBucket<TMetadata>(_s3, GetMapping(typeof(TMetadata)));
 
-        return new S3ObjectBucket<TMetadata>(_s3, mapping);
+    public IObjectBucket<TMetadata, TKey> GetBucket<TMetadata, TKey>()
+        where TMetadata : class, IObjectMetadata
+        where TKey : notnull
+    {
+        // The Guid shape stays the richer historic one, whichever overload asked for it.
+        if (typeof(TKey) == typeof(Guid))
+            return (IObjectBucket<TMetadata, TKey>)GetBucket<TMetadata>();
+
+        return new S3ObjectBucket<TMetadata, TKey>(_s3, GetMapping(typeof(TMetadata)));
     }
+
+    ObjectMapping GetMapping(Type metadataType)
+        => _mappings.TryGetValue(metadataType, out var mapping)
+            ? mapping
+            : throw new InvalidOperationException($"No mapping configured for type {metadataType.FullName}.");
 
     public Task<IReadOnlyList<BucketInfo>> ListBucketsAsync(CancellationToken cancellationToken = default)
         => _s3.ListBucketsAsync(cancellationToken);

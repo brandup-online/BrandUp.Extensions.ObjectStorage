@@ -20,11 +20,9 @@ internal class ObjectMapping
     public string? ObjectKeyPrefix { get; private init; }
     public IEnumerable<string> MetadataKeys => _properties.Keys;
 
-    public string GetObjectKey(Guid objectId)
-    {
-        var id = objectId.ToString("d");
-        return ObjectKeyPrefix is null ? id : string.Join(ObjectKeyDelimiter, ObjectKeyPrefix, id);
-    }
+    /// <param name="objectId">Already-serialized object identifier (see ObjectKeySerializer).</param>
+    public string GetObjectKey(string objectId)
+        => ObjectKeyPrefix is null ? objectId : string.Join(ObjectKeyDelimiter, ObjectKeyPrefix, objectId);
 
     public IDictionary<string, string> Serialize(IObjectMetadata metadata)
     {
@@ -77,9 +75,7 @@ internal class ObjectMapping
         ArgumentException.ThrowIfNullOrEmpty(destination);
 
         destination = destination.ToLower().Trim();
-        var slash = destination.IndexOf('/');
-        string bucketName = slash == -1 ? destination : destination[..slash];
-        string? objectKeyPrefix = slash == -1 ? null : destination[(slash + 1)..];
+        var (bucketName, objectKeyPrefix) = DestinationValidator.Split(destination);
 
         var constructor = objectType.GetConstructor(BindingFlags.Instance | BindingFlags.Public, [])
             ?? throw new ArgumentException($"Type {objectType.FullName} has no public parameterless constructor.", nameof(objectType));
@@ -104,12 +100,7 @@ internal class ObjectMapping
 
     static PropertyAccessor CreateAccessor(Type declaringType, PropertyInfo property)
     {
-        var getParam = Expression.Parameter(typeof(object), "obj");
-        var getter = Expression.Lambda<Func<object, object?>>(
-            Expression.Convert(
-                Expression.Property(Expression.Convert(getParam, declaringType), property),
-                typeof(object)),
-            getParam).Compile();
+        var getter = PropertyGetters.Compile(property);
 
         var setObjParam = Expression.Parameter(typeof(object), "obj");
         var setValParam = Expression.Parameter(typeof(object), "val");

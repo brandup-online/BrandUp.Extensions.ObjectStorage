@@ -111,7 +111,8 @@ public static class ServiceCollectionExtensions
         {
             var metadataType = property.MetadataType;
             BucketRegistration.Register(services, registry, contextType, metadataType,
-                sp => sp.GetRequiredService<TContext>().Bucket(metadataType));
+                sp => sp.GetRequiredService<TContext>().Bucket(metadataType),
+                property.ServiceType);   // IObjectBucket<TMetadata> or IObjectBucket<TMetadata, TKey>
         }
 
         return new ObjectStorageContextBuilder<TContext>(services, registry, connectionName);
@@ -130,26 +131,18 @@ public static class ServiceCollectionExtensions
         ObjectStorageOptions options,
         IReadOnlyDictionary<string, Action<BucketSettings>> declaredInCode)
     {
-        var result = new Dictionary<string, Action<BucketSettings>>(StringComparer.OrdinalIgnoreCase);
-        var configuredNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // Pass 1 — what the registration declared, re-keyed by physical bucket name (kernel shared with Testing).
+        var result = new Dictionary<string, Action<BucketSettings>>(
+            model.MapSettingsToBuckets(destinations, declaredInCode), StringComparer.OrdinalIgnoreCase);
 
-        // Pass 1 — what the registration declared, per key, in declaration order.
+        // Configuration is keyed by the bucket name as written in Objects (without the environment
+        // prefix/suffix); the final name is accepted too, since usually they are the same. Every key is
+        // present in Objects here — ResolveDestinations already required it.
+        var configuredNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var property in model.Properties)
         {
-            var bucketName = BucketNameOf(destinations[property.MetadataType]);
-
-            // Configuration is keyed by the bucket name as written in Buckets (without the environment
-            // prefix/suffix); the final name is accepted too, since usually they are the same.
-            configuredNames[bucketName] = options.Objects.TryGetValue(property.ConfigurationKey, out var value)
-                ? BucketNameOf(value)
-                : property.ConfigurationKey;
-
-            if (!declaredInCode.TryGetValue(property.ConfigurationKey, out var fromCode))
-                continue;
-
-            result[bucketName] = result.TryGetValue(bucketName, out var existing)
-                ? existing + fromCode
-                : fromCode;
+            var bucketName = DestinationValidator.Split(destinations[property.MetadataType]).BucketName;
+            configuredNames[bucketName] = DestinationValidator.Split(options.Objects[property.ConfigurationKey]).BucketName;
         }
 
         // Pass 2 — configuration on top of code, once per physical bucket even if several keys point to it.
@@ -165,12 +158,6 @@ public static class ServiceCollectionExtensions
         }
 
         return result;
-    }
-
-    static string BucketNameOf(string destination)
-    {
-        var slash = destination.IndexOf('/');
-        return slash == -1 ? destination : destination[..slash];
     }
 
     static ObjectStorageRegistry AddConnectionCore(IServiceCollection services, string name, Action<ObjectStorageOptions> configure)
@@ -194,8 +181,8 @@ public static class ServiceCollectionExtensions
     }
 
     // The registry is shared registration-time state, so it lives in the service collection as an instance and
-    // is picked up by every subsequent AddObjectStorage* call.
-    static ObjectStorageRegistry GetOrAddRegistry(IServiceCollection services)
+    // is picked up by every subsequent AddObjectStorage* call (including the ObjectStorageBuilder compat ctor).
+    internal static ObjectStorageRegistry GetOrAddRegistry(IServiceCollection services)
     {
         foreach (var descriptor in services)
         {

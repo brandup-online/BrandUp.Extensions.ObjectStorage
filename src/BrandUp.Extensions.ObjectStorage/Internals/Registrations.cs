@@ -11,9 +11,10 @@ internal static class BucketRegistration
         ObjectStorageRegistry registry,
         Type owner,
         Type metadataType,
-        Func<IServiceProvider, object> resolve)
+        Func<IServiceProvider, object> resolve,
+        Type? serviceType = null)
     {
-        var serviceType = typeof(IObjectBucket<>).MakeGenericType(metadataType);
+        serviceType ??= typeof(IObjectBucket<>).MakeGenericType(metadataType);
 
         if (registry.ClaimMetadata(metadataType, owner, out var currentOwner))
         {
@@ -23,9 +24,8 @@ internal static class BucketRegistration
 
         // Two owners map the same metadata type, so a bare bucket injection would be ambiguous. Fail with an
         // explanation at resolve time instead of silently binding to one of them.
-        var message =
-            $"Metadata type {metadataType.FullName} is mapped both in {ObjectStorageRegistry.Display(currentOwner)} " +
-            $"and in {ObjectStorageRegistry.Display(owner)}. Inject the storage context instead of IObjectBucket<{metadataType.Name}>.";
+        var message = MetadataOwners.AmbiguityMessage(metadataType,
+            ObjectStorageRegistry.Display(currentOwner), ObjectStorageRegistry.Display(owner));
 
         services.AddSingleton(serviceType, _ => throw new InvalidOperationException(message));
     }

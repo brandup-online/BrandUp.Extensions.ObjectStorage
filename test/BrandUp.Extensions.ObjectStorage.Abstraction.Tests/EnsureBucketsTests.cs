@@ -171,6 +171,11 @@ public class EnsureBucketsTests
 
         public bool Exists(string bucketName) => _existing.Contains(bucketName);
 
+        public IObjectBucket<TMetadata, TKey> GetBucket<TMetadata, TKey>()
+            where TMetadata : class, IObjectMetadata
+            where TKey : notnull
+            => throw new NotSupportedException();
+
         public Task DropBucketAsync(string bucketName, CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
 
@@ -211,6 +216,13 @@ public class EnsureBucketsTests
             => throw new NotSupportedException();
 
         public Task<bool> DeleteOneAsync(Guid objectId, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        // Base (Guid-keyed) interface members, shadowed by the ObjectItem<TMetadata>-typed ones above.
+        Task<ObjectItem<TMetadata, Guid>?> IObjectBucket<TMetadata, Guid>.FindOneAsync(Guid objectId, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+
+        Task<ObjectItem<TMetadata, Guid>> IObjectBucket<TMetadata, Guid>.UploadAsync(Guid objectId, TMetadata metadata, Stream content, CancellationToken cancellationToken)
             => throw new NotSupportedException();
     }
 }

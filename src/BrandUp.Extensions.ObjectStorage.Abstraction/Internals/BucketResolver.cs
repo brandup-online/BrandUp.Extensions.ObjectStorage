@@ -42,9 +42,8 @@ internal static class BucketResolver
                 $"Bucket for {location} is not configured. Add it to the connection configuration " +
                 $"as Objects:{key} (\"bucket\" or \"bucket/prefix\").");
 
-        var slash = destination.IndexOf('/');
-        var bucketName = slash == -1 ? destination : destination[..slash];
-        var prefix = slash == -1 ? declaredPrefix : destination[(slash + 1)..];
+        var (bucketName, parsedPrefix) = DestinationValidator.Split(destination);
+        var prefix = parsedPrefix ?? declaredPrefix;
 
         if (!string.IsNullOrEmpty(namePrefix) || !string.IsNullOrEmpty(nameSuffix))
             bucketName = namePrefix + bucketName + nameSuffix;
@@ -64,9 +63,7 @@ internal static class BucketResolver
         string? nameSuffix,
         string location)
     {
-        var slash = destination.IndexOf('/');
-        var bucketName = slash == -1 ? destination : destination[..slash];
-        var declaredPrefix = slash == -1 ? null : destination[(slash + 1)..];
+        var (bucketName, declaredPrefix) = DestinationValidator.Split(destination);
 
         // Renaming the bucket in configuration must not silently drop the prefix declared in AddMapping.
         return Resolve(bucketName, buckets, namePrefix, nameSuffix, destination, location, declaredPrefix);

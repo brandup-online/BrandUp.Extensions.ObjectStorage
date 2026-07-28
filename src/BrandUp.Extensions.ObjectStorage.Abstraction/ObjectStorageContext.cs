@@ -32,10 +32,22 @@ public abstract class ObjectStorageContext : IObjectStorageContext
     public IReadOnlyCollection<IObjectBucket> Buckets
         => _client is null ? throw NotInitialized() : _buckets.Values;
 
-    /// <summary>Bucket serving <typeparamref name="TMetadata"/>.</summary>
+    /// <summary>Bucket serving <typeparamref name="TMetadata"/>, keyed by <see cref="Guid"/>.</summary>
     public IObjectBucket<TMetadata> Bucket<TMetadata>()
         where TMetadata : class, IObjectMetadata
-        => (IObjectBucket<TMetadata>)Bucket(typeof(TMetadata));
+        => Bucket(typeof(TMetadata)) as IObjectBucket<TMetadata>
+            ?? throw KeyMismatch(typeof(TMetadata), typeof(Guid));
+
+    /// <summary>Bucket serving <typeparamref name="TMetadata"/>, keyed by <typeparamref name="TKey"/>.</summary>
+    public IObjectBucket<TMetadata, TKey> Bucket<TMetadata, TKey>()
+        where TMetadata : class, IObjectMetadata
+        where TKey : notnull
+        => Bucket(typeof(TMetadata)) as IObjectBucket<TMetadata, TKey>
+            ?? throw KeyMismatch(typeof(TMetadata), typeof(TKey));
+
+    InvalidOperationException KeyMismatch(Type metadataType, Type keyType)
+        => new($"Bucket for {metadataType.Name} in {GetType().Name} is not keyed by {keyType.Name}; " +
+            "check the key type declared by the context property.");
 
     /// <summary>Bucket serving <paramref name="metadataType"/>.</summary>
     public IObjectBucket Bucket(Type metadataType)
@@ -148,6 +160,30 @@ public abstract class ObjectStorageContext : IObjectStorageContext
     public Task<bool> DeleteAsync<TMetadata>(Guid objectId, CancellationToken cancellationToken = default)
         where TMetadata : class, IObjectMetadata
         => Bucket<TMetadata>().DeleteOneAsync(objectId, cancellationToken);
+
+    #endregion
+
+    #region Typed-key facade
+
+    public Task<ObjectItem<TMetadata, TKey>?> FindAsync<TMetadata, TKey>(TKey objectId, CancellationToken cancellationToken = default)
+        where TMetadata : class, IObjectMetadata
+        where TKey : notnull
+        => Bucket<TMetadata, TKey>().FindOneAsync(objectId, cancellationToken);
+
+    public Task<Stream?> ReadAsync<TMetadata, TKey>(TKey objectId, CancellationToken cancellationToken = default)
+        where TMetadata : class, IObjectMetadata
+        where TKey : notnull
+        => Bucket<TMetadata, TKey>().OpenReadAsync(objectId, cancellationToken);
+
+    public Task<ObjectItem<TMetadata, TKey>> UploadAsync<TMetadata, TKey>(TKey objectId, TMetadata metadata, Stream stream, CancellationToken cancellationToken = default)
+        where TMetadata : class, IObjectMetadata
+        where TKey : notnull
+        => Bucket<TMetadata, TKey>().UploadAsync(objectId, metadata, stream, cancellationToken);
+
+    public Task<bool> DeleteAsync<TMetadata, TKey>(TKey objectId, CancellationToken cancellationToken = default)
+        where TMetadata : class, IObjectMetadata
+        where TKey : notnull
+        => Bucket<TMetadata, TKey>().DeleteOneAsync(objectId, cancellationToken);
 
     #endregion
 }

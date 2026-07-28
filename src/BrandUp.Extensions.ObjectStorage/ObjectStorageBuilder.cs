@@ -14,9 +14,9 @@ public class ObjectStorageBuilder
     readonly string _connectionName;
 
     public ObjectStorageBuilder(IServiceCollection services)
-        : this(services, new ObjectStorageRegistry(), Options.DefaultName)
+        : this(services ?? throw new ArgumentNullException(nameof(services)),
+            ServiceCollectionExtensions.GetOrAddRegistry(services), Options.DefaultName)
     {
-        ArgumentNullException.ThrowIfNull(services);
     }
 
     internal ObjectStorageBuilder(IServiceCollection services, ObjectStorageRegistry registry, string connectionName)
@@ -134,11 +134,7 @@ public class ObjectStorageContextBuilder<TContext>
     {
         ArgumentNullException.ThrowIfNull(configure);
 
-        var model = StorageModel.Build(typeof(TContext));
-        var property = model.Properties.FirstOrDefault(p => p.MetadataType == typeof(TMetadata))
-            ?? throw new InvalidOperationException(
-                $"Storage context {typeof(TContext).Name} has no bucket for metadata type {typeof(TMetadata).FullName}.");
-
+        var property = StorageModel.Build(typeof(TContext)).RequireProperty(typeof(TMetadata));
         _registry.ConfigureBucket(typeof(TContext), property.ConfigurationKey, configure);
 
         return this;
@@ -152,13 +148,8 @@ public class ObjectStorageContextBuilder<TContext>
         ArgumentException.ThrowIfNullOrWhiteSpace(key);
         ArgumentNullException.ThrowIfNull(configure);
 
-        var model = StorageModel.Build(typeof(TContext));
-        if (!model.Properties.Any(p => string.Equals(p.ConfigurationKey, key, StringComparison.OrdinalIgnoreCase)))
-            throw new InvalidOperationException(
-                $"Storage context {typeof(TContext).Name} has no bucket with configuration key '{key}'. " +
-                $"Known keys: {string.Join(", ", model.Properties.Select(p => p.ConfigurationKey))}.");
-
-        _registry.ConfigureBucket(typeof(TContext), key, configure);
+        var property = StorageModel.Build(typeof(TContext)).RequireProperty(key);
+        _registry.ConfigureBucket(typeof(TContext), property.ConfigurationKey, configure);
 
         return this;
     }

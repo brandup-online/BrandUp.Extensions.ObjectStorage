@@ -39,36 +39,61 @@ internal class S3ObjectBucket(string name, IS3Client client) : IObjectBucket
     }
 }
 
-internal class S3ObjectBucket<TMetadata>(IS3Client client, ObjectMapping mapping)
-    : S3ObjectBucket(mapping.BucketName, client), IObjectBucket<TMetadata>
+internal class S3ObjectBucket<TMetadata, TKey>(IS3Client client, ObjectMapping mapping)
+    : S3ObjectBucket(mapping.BucketName, client), IObjectBucket<TMetadata, TKey>
     where TMetadata : class, IObjectMetadata
+    where TKey : notnull
 {
-    public async Task<ObjectItem<TMetadata>?> FindOneAsync(Guid objectId, CancellationToken cancellationToken = default)
+    readonly Func<TKey, string> _keySerializer = ObjectKeySerializer.Get<TKey>();
+
+    public async Task<ObjectItem<TMetadata, TKey>?> FindOneAsync(TKey objectId, CancellationToken cancellationToken = default)
     {
-        var obj = await Client.FindAsync(Name, mapping.GetObjectKey(objectId), mapping.MetadataKeys, cancellationToken);
+        var obj = await Client.FindAsync(Name, GetObjectKey(objectId), mapping.MetadataKeys, cancellationToken);
         if (obj is null)
             return null;
 
-        return ToObjectItem(objectId, obj, (TMetadata)mapping.Deserialize(obj.Metadata));
+        return CreateItem(objectId, obj, (TMetadata)mapping.Deserialize(obj.Metadata));
     }
 
-    public Task<Stream?> OpenReadAsync(Guid objectId, CancellationToken cancellationToken = default)
-        => Client.ReadAsync(Name, mapping.GetObjectKey(objectId), cancellationToken);
+    public Task<Stream?> OpenReadAsync(TKey objectId, CancellationToken cancellationToken = default)
+        => Client.ReadAsync(Name, GetObjectKey(objectId), cancellationToken);
 
-    public async Task<ObjectItem<TMetadata>> UploadAsync(Guid objectId, TMetadata metadata, Stream content, CancellationToken cancellationToken = default)
+    public async Task<ObjectItem<TMetadata, TKey>> UploadAsync(TKey objectId, TMetadata metadata, Stream content, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(metadata);
         ArgumentNullException.ThrowIfNull(content);
 
         var serialized = mapping.Serialize(metadata);
-        var obj = await Client.UploadAsync(Name, mapping.GetObjectKey(objectId), serialized, content, cancellationToken);
+        var obj = await Client.UploadAsync(Name, GetObjectKey(objectId), serialized, content, cancellationToken);
 
-        return ToObjectItem(objectId, obj, metadata);
+        return CreateItem(objectId, obj, metadata);
     }
 
-    public Task<bool> DeleteOneAsync(Guid objectId, CancellationToken cancellationToken = default)
-        => Client.DeleteAsync(Name, mapping.GetObjectKey(objectId), cancellationToken);
+    public Task<bool> DeleteOneAsync(TKey objectId, CancellationToken cancellationToken = default)
+        => Client.DeleteAsync(Name, GetObjectKey(objectId), cancellationToken);
 
-    static ObjectItem<TMetadata> ToObjectItem(Guid id, S3StorageObject obj, TMetadata metadata)
+    /// <summary>The Guid subclass narrows the item to <see cref="ObjectItem{TMetadata}"/>.</summary>
+    protected virtual ObjectItem<TMetadata, TKey> CreateItem(TKey id, S3StorageObject obj, TMetadata metadata)
         => new() { Id = id, Size = obj.Size, ETag = obj.Etag, Metadata = metadata };
+
+    string GetObjectKey(TKey objectId)
+    {
+        ArgumentNullException.ThrowIfNull(objectId);
+        return mapping.GetObjectKey(_keySerializer(objectId));
+    }
+}
+
+/// <summary>Guid-keyed bucket — the historic shape with <see cref="ObjectItem{TMetadata}"/> results.</summary>
+internal sealed class S3ObjectBucket<TMetadata>(IS3Client client, ObjectMapping mapping)
+    : S3ObjectBucket<TMetadata, Guid>(client, mapping), IObjectBucket<TMetadata>
+    where TMetadata : class, IObjectMetadata
+{
+    protected override ObjectItem<TMetadata, Guid> CreateItem(Guid id, S3StorageObject obj, TMetadata metadata)
+        => new ObjectItem<TMetadata> { Id = id, Size = obj.Size, ETag = obj.Etag, Metadata = metadata };
+
+    public new async Task<ObjectItem<TMetadata>?> FindOneAsync(Guid objectId, CancellationToken cancellationToken = default)
+        => (ObjectItem<TMetadata>?)await base.FindOneAsync(objectId, cancellationToken);
+
+    public new async Task<ObjectItem<TMetadata>> UploadAsync(Guid objectId, TMetadata metadata, Stream content, CancellationToken cancellationToken = default)
+        => (ObjectItem<TMetadata>)await base.UploadAsync(objectId, metadata, content, cancellationToken);
 }

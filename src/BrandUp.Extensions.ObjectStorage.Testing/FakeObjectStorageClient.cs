@@ -1,4 +1,5 @@
 using System.Net;
+using BrandUp.Extensions.ObjectStorage.Internals;
 
 namespace BrandUp.Extensions.ObjectStorage;
 
@@ -13,14 +14,12 @@ public class FakeObjectStorageClient(FakeObjectStore store) : IObjectStorageClie
     public void AddMapping(Type metadataType, string destination)
     {
         ArgumentNullException.ThrowIfNull(metadataType);
-        ArgumentException.ThrowIfNullOrWhiteSpace(destination);
-        destination = destination.Trim().Trim('/').ToLower();
 
-        var slash = destination.IndexOf('/');
-        var bucketName = slash == -1 ? destination : destination[..slash];
-        var prefix = slash == -1 ? null : destination[(slash + 1)..];
+        // Same rules as the real AddMapping path, so the fake rejects what production would reject;
+        // lower-casing mirrors ObjectMapping.Create.
+        destination = DestinationValidator.Normalize(destination, nameof(destination)).ToLower();
 
-        _mappings[metadataType] = (bucketName, prefix);
+        _mappings[metadataType] = DestinationValidator.Split(destination);
     }
 
     public IObjectBucket GetBucket(string bucketName)
@@ -32,12 +31,26 @@ public class FakeObjectStorageClient(FakeObjectStore store) : IObjectStorageClie
     public IObjectBucket<TMetadata> GetBucket<TMetadata>()
         where TMetadata : class, IObjectMetadata
     {
-        var type = typeof(TMetadata);
-        if (!_mappings.TryGetValue(type, out var mapping))
-            throw new InvalidOperationException($"No mapping configured for type {type.FullName}.");
-
+        var mapping = GetMapping(typeof(TMetadata));
         return new FakeObjectBucket<TMetadata>(mapping.BucketName, mapping.Prefix, store);
     }
+
+    public IObjectBucket<TMetadata, TKey> GetBucket<TMetadata, TKey>()
+        where TMetadata : class, IObjectMetadata
+        where TKey : notnull
+    {
+        // The Guid shape stays the richer historic one, whichever overload asked for it.
+        if (typeof(TKey) == typeof(Guid))
+            return (IObjectBucket<TMetadata, TKey>)GetBucket<TMetadata>();
+
+        var mapping = GetMapping(typeof(TMetadata));
+        return new FakeObjectBucket<TMetadata, TKey>(mapping.BucketName, mapping.Prefix, store);
+    }
+
+    (string BucketName, string? Prefix) GetMapping(Type metadataType)
+        => _mappings.TryGetValue(metadataType, out var mapping)
+            ? mapping
+            : throw new InvalidOperationException($"No mapping configured for type {metadataType.FullName}.");
 
     public Task<IReadOnlyList<BucketInfo>> ListBucketsAsync(CancellationToken cancellationToken = default)
         => Task.FromResult(store.ListBuckets());

@@ -80,10 +80,18 @@ internal static class DestinationValidator
         if (destination.Length == 0)
             throw new ArgumentException("Destination cannot be empty.", paramName);
 
-        var slash = destination.IndexOf('/');
-        var bucketName = slash == -1 ? destination : destination[..slash];
-        var prefix = slash == -1 ? null : destination[(slash + 1)..];
+        var (bucketName, prefix) = Split(destination);
 
         return Combine(NormalizeBucketName(bucketName, paramName), NormalizePrefix(prefix, paramName));
+    }
+
+    /// <summary>
+    /// Splits a destination into the bucket name and the optional object key prefix — everything after
+    /// the first <c>/</c>. The single place that knows the <c>bucket/prefix</c> syntax.
+    /// </summary>
+    public static (string BucketName, string? Prefix) Split(string destination)
+    {
+        var slash = destination.IndexOf('/');
+        return slash == -1 ? (destination, null) : (destination[..slash], destination[(slash + 1)..]);
     }
 }

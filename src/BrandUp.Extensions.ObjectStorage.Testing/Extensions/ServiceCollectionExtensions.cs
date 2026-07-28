@@ -44,14 +44,16 @@ public static class FakeObjectStorageServiceCollectionExtensions
             // Names are resolved when the context is created, so overrides can be applied by the builder first.
             // Unlike a real connection, a bucket without a configured name falls back to its key: in tests the
             // physical name is just a label, and WithBucketName is there when it matters.
-            foreach (var (metadataType, destination) in model.ResolveDestinations(
-                names.Objects, names.NamePrefix, names.NameSuffix, fallbackToKey: true))
+            var destinations = model.ResolveDestinations(
+                names.Objects, names.NamePrefix, names.NameSuffix, fallbackToKey: true);
+
+            foreach (var (metadataType, destination) in destinations)
                 client.AddMapping(metadataType, destination);
 
             names.Resolved = true;
 
             var context = ActivatorUtilities.CreateInstance<TContext>(sp);
-            context.Initialize(client, model, names.BuildBucketSettings(model));
+            context.Initialize(client, model, model.MapSettingsToBuckets(destinations, names.Settings));
 
             return context;
         });
@@ -61,7 +63,7 @@ public static class FakeObjectStorageServiceCollectionExtensions
         foreach (var property in model.Properties)
         {
             var metadataType = property.MetadataType;
-            var serviceType = typeof(IObjectBucket<>).MakeGenericType(metadataType);
+            var serviceType = property.ServiceType;   // IObjectBucket<TMetadata> or IObjectBucket<TMetadata, TKey>
 
             if (owners.Claim(metadataType, typeof(TContext), out var currentOwner))
             {
@@ -69,11 +71,10 @@ public static class FakeObjectStorageServiceCollectionExtensions
                 continue;
             }
 
-            // Same rule as a real connection: an ambiguous bucket injection fails with an explanation instead
-            // of silently binding to one of the contexts.
-            var message =
-                $"Metadata type {metadataType.FullName} is mapped both in {currentOwner.FullName} and in " +
-                $"{typeof(TContext).FullName}. Inject the storage context instead of IObjectBucket<{metadataType.Name}>.";
+            // Same rule (and same wording) as a real connection: an ambiguous bucket injection fails with
+            // an explanation instead of silently binding to one of the contexts.
+            var message = MetadataOwners.AmbiguityMessage(metadataType,
+                currentOwner.FullName ?? currentOwner.Name, typeof(TContext).FullName ?? typeof(TContext).Name);
 
             services.AddSingleton(serviceType, _ => throw new InvalidOperationException(message));
         }
@@ -81,40 +82,29 @@ public static class FakeObjectStorageServiceCollectionExtensions
         return new FakeObjectStorageBuilder<TContext>(services, store, client, names);
     }
 
-    static FakeBucketOwners GetOrAddOwners(IServiceCollection services)
+    // Registration-time state shared by every AddFakeObjectStorage<TContext> call in the collection.
+    static MetadataOwners GetOrAddOwners(IServiceCollection services)
     {
         foreach (var descriptor in services)
         {
             if (!descriptor.IsKeyedService
-                && descriptor.ServiceType == typeof(FakeBucketOwners)
-                && descriptor.ImplementationInstance is FakeBucketOwners existing)
+                && descriptor.ServiceType == typeof(MetadataOwners)
+                && descriptor.ImplementationInstance is MetadataOwners existing)
                 return existing;
         }
 
-        var owners = new FakeBucketOwners();
+        var owners = new MetadataOwners();
         services.AddSingleton(owners);
 
         return owners;
     }
-}
 
-/// <summary>Which fake context serves which metadata type; mirrors the registry of a real registration.</summary>
-internal sealed class FakeBucketOwners
-{
-    readonly Dictionary<Type, Type> _owners = [];
-
-    public bool Claim(Type metadataType, Type contextType, out Type currentOwner)
+    // Bucket pre-creation shared by both fake builders.
+    internal static void CreateBucket(FakeObjectStore store, string bucketName, Action<BucketSettings>? configure)
     {
-        if (_owners.TryGetValue(metadataType, out var existing))
-        {
-            currentOwner = existing;
-            return existing == contextType;
-        }
-
-        _owners[metadataType] = contextType;
-        currentOwner = contextType;
-
-        return true;
+        var settings = new BucketSettings();
+        configure?.Invoke(settings);
+        store.CreateBucket(bucketName.ToLower(), settings);
     }
 }
 
@@ -130,32 +120,6 @@ public sealed class FakeBucketNames
 
     /// <summary>Set once the context has been created and its buckets resolved.</summary>
     internal bool Resolved { get; set; }
-
-    // Same shape as the real registration: settings are keyed by the physical bucket name.
-    internal IReadOnlyDictionary<string, Action<BucketSettings>> BuildBucketSettings(StorageModel model)
-    {
-        var result = new Dictionary<string, Action<BucketSettings>>(StringComparer.OrdinalIgnoreCase);
-        if (Settings.Count == 0)
-            return result;
-
-        var destinations = model.ResolveDestinations(Objects, NamePrefix, NameSuffix, fallbackToKey: true);
-
-        foreach (var property in model.Properties)
-        {
-            if (!Settings.TryGetValue(property.ConfigurationKey, out var configure))
-                continue;
-
-            var destination = destinations[property.MetadataType];
-            var slash = destination.IndexOf('/');
-            var bucketName = slash == -1 ? destination : destination[..slash];
-
-            result[bucketName] = result.TryGetValue(bucketName, out var existing)
-                ? existing + configure
-                : configure;
-        }
-
-        return result;
-    }
 }
 
 public class FakeObjectStorageBuilder(IServiceCollection services, FakeObjectStore store, FakeObjectStorageClient client)
@@ -176,9 +140,7 @@ public class FakeObjectStorageBuilder(IServiceCollection services, FakeObjectSto
     /// </summary>
     public FakeObjectStorageBuilder WithBucket(string bucketName, Action<BucketSettings>? configure = null)
     {
-        var settings = new BucketSettings();
-        configure?.Invoke(settings);
-        store.CreateBucket(bucketName.ToLower(), settings);
+        FakeObjectStorageServiceCollectionExtensions.CreateBucket(store, bucketName, configure);
         return this;
     }
 }
@@ -238,14 +200,13 @@ public class FakeObjectStorageBuilder<TContext>(
         ArgumentNullException.ThrowIfNull(configure);
 
         // Same contract as the real registration: an unknown key is a registration-time error, not a silent no-op.
-        var model = StorageModel.Build(typeof(TContext));
-        if (!model.Properties.Any(p => string.Equals(p.ConfigurationKey, key, StringComparison.OrdinalIgnoreCase)))
-            throw new InvalidOperationException(
-                $"Storage context {typeof(TContext).Name} has no bucket with configuration key '{key}'. " +
-                $"Known keys: {string.Join(", ", model.Properties.Select(p => p.ConfigurationKey))}.");
+        var property = StorageModel.Build(typeof(TContext)).RequireProperty(key);
 
         EnsureNotResolved();
-        names.Settings[key] = names.Settings.TryGetValue(key, out var existing) ? existing + configure : configure;
+        names.Settings[property.ConfigurationKey] =
+            names.Settings.TryGetValue(property.ConfigurationKey, out var existing)
+                ? existing + configure
+                : configure;
 
         return this;
     }
@@ -265,9 +226,7 @@ public class FakeObjectStorageBuilder<TContext>(
     /// </summary>
     public FakeObjectStorageBuilder<TContext> WithBucket(string bucketName, Action<BucketSettings>? configure = null)
     {
-        var settings = new BucketSettings();
-        configure?.Invoke(settings);
-        store.CreateBucket(bucketName.ToLower(), settings);
+        FakeObjectStorageServiceCollectionExtensions.CreateBucket(store, bucketName, configure);
         return this;
     }
 

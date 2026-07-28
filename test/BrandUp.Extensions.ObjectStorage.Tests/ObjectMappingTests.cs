@@ -24,19 +24,19 @@ public class ObjectMappingTests
     }
 
     [Fact]
-    public void GetObjectKey_WithoutPrefix_ReturnsGuidD()
+    public void GetObjectKey_WithoutPrefix_ReturnsIdAsIs()
     {
         var mapping = ObjectMapping.Create(typeof(PersonMetadata), "bucket");
-        var id = Guid.NewGuid();
-        Assert.Equal(id.ToString("d"), mapping.GetObjectKey(id));
+        var id = Guid.NewGuid().ToString("d");
+        Assert.Equal(id, mapping.GetObjectKey(id));
     }
 
     [Fact]
     public void GetObjectKey_WithPrefix_PrefixesWithUnderscore()
     {
         var mapping = ObjectMapping.Create(typeof(PersonMetadata), "bucket/items");
-        var id = Guid.NewGuid();
-        Assert.Equal($"items_{id:d}", mapping.GetObjectKey(id));
+        var id = Guid.NewGuid().ToString("d");
+        Assert.Equal($"items_{id}", mapping.GetObjectKey(id));
     }
 
     [Fact]
