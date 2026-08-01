@@ -621,7 +621,9 @@ services.AddFakeObjectStorage<MediaStorage>(store);
 services.AddFakeObjectStorage<ReportStorage>(store);
 ```
 
-Фейковая регистрация повторяет контракт прода: если один тип метаданных объявлен в двух контекстах, инъекция `IObjectBucket<T>` бросает исключение с именами обоих контекстов, а обращаться нужно через контекст. Имена бакетов фиксируются при первом резолве контекста, поэтому `WithBucketName`/`WithBucketNamePrefix`/`WithBucketNameSuffix` после этого бросают исключение вместо молчаливого игнорирования.
+Фейковая регистрация повторяет контракт прода: если один тип метаданных объявлен в двух контекстах (или в контексте и в `AddMapping`), инъекция `IObjectBucket<T>` бросает исключение с именами обоих владельцев, а обращаться нужно через контекст. Имена бакетов фиксируются при первом резолве контекста, поэтому `WithBucketName`/`WithBucketNamePrefix`/`WithBucketNameSuffix` после этого бросают исключение вместо молчаливого игнорирования.
+
+Поведение при отсутствующем бакете тоже продовое: `UploadAsync`, `GetSettingsAsync`/`UpdateSettingsAsync` и `DropBucketAsync` бросают `ObjectStorageException` с кодом `NoSuchBucket` (создайте бакет через `WithBucket` или `EnsureBucketsAsync`), а `FindOneAsync`/`OpenReadAsync`/`DeleteOneAsync` мягко возвращают `null`/`false` — как реальный клиент.
 
 Настройки бакетов задаются так же, как при реальной регистрации, и по тем же правилам определяют, какие бакеты создаются:
 

@@ -78,6 +78,13 @@ public class FakeObjectStorageClient(FakeObjectStore store) : IObjectStorageClie
     public Task DropBucketAsync(string bucketName, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(bucketName);
+
+        // Same shape as a real provider: deleting a missing bucket is 404 NoSuchBucket.
+        if (!store.BucketExists(bucketName))
+            throw new ObjectStorageException(
+                $"Bucket '{bucketName}' does not exist.", HttpStatusCode.NotFound, "NoSuchBucket",
+                new InvalidOperationException($"Bucket '{bucketName}' does not exist."));
+
         store.DropBucket(bucketName.ToLower());
         return Task.CompletedTask;
     }

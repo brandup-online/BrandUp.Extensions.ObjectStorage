@@ -224,6 +224,44 @@ public class FakeStorageContextTests
     }
 
     [Fact]
+    public async Task MissingBucket_BehavesLikeProduction()
+    {
+        var services = new ServiceCollection();
+        services.AddFakeObjectStorage<MediaStorage>();   // buckets are not provisioned
+
+        using var sp = services.BuildServiceProvider();
+        var storage = sp.GetRequiredService<MediaStorage>();
+        var id = Guid.NewGuid();
+
+        // Upload fails with NoSuchBucket, like S3; reads stay lenient, like the real client.
+        var ex = await Assert.ThrowsAsync<ObjectStorageException>(
+            () => storage.Photos.UploadAsync(id, new PhotoMetadata(), new MemoryStream([1])));
+        Assert.Equal("NoSuchBucket", ex.ErrorCode);
+
+        Assert.Null(await storage.Photos.FindOneAsync(id));
+        Assert.Null(await storage.Photos.OpenReadAsync(id));
+        Assert.False(await storage.Photos.DeleteOneAsync(id));
+
+        await Assert.ThrowsAsync<ObjectStorageException>(() => storage.Photos.GetSettingsAsync());
+        await Assert.ThrowsAsync<ObjectStorageException>(() => storage.Client.DropBucketAsync("photos"));
+    }
+
+    [Fact]
+    public void LegacyMapping_And_Context_SameMetadata_BareBucketThrows()
+    {
+        var services = new ServiceCollection();
+        services.AddFakeObjectStorage().AddMapping<PhotoMetadata>("legacy-photos");
+        services.AddFakeObjectStorage<MediaStorage>();
+
+        using var sp = services.BuildServiceProvider();
+
+        // The context still works; the bare bucket is ambiguous, same as mixing prod registrations.
+        Assert.Equal("photos", sp.GetRequiredService<MediaStorage>().Photos.Name);
+        var ex = Assert.Throws<InvalidOperationException>(() => sp.GetRequiredService<IObjectBucket<PhotoMetadata>>());
+        Assert.Contains("the default fake storage", ex.Message);
+    }
+
+    [Fact]
     public void SeparateContexts_HaveSeparateStores()
     {
         var services = new ServiceCollection();

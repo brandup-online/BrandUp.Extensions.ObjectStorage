@@ -74,7 +74,7 @@ public static class FakeObjectStorageServiceCollectionExtensions
             // Same rule (and same wording) as a real connection: an ambiguous bucket injection fails with
             // an explanation instead of silently binding to one of the contexts.
             var message = MetadataOwners.AmbiguityMessage(metadataType,
-                currentOwner.FullName ?? currentOwner.Name, typeof(TContext).FullName ?? typeof(TContext).Name);
+                DisplayOwner(currentOwner), DisplayOwner(typeof(TContext)));
 
             services.AddSingleton(serviceType, _ => throw new InvalidOperationException(message));
         }
@@ -82,8 +82,11 @@ public static class FakeObjectStorageServiceCollectionExtensions
         return new FakeObjectStorageBuilder<TContext>(services, store, client, names);
     }
 
-    // Registration-time state shared by every AddFakeObjectStorage<TContext> call in the collection.
-    static MetadataOwners GetOrAddOwners(IServiceCollection services)
+    internal static string DisplayOwner(Type owner)
+        => owner == typeof(FakeObjectStorageBuilder) ? "the default fake storage" : owner.FullName ?? owner.Name;
+
+    // Registration-time state shared by every AddFakeObjectStorage* call in the collection.
+    internal static MetadataOwners GetOrAddOwners(IServiceCollection services)
     {
         foreach (var descriptor in services)
         {
@@ -129,8 +132,21 @@ public class FakeObjectStorageBuilder(IServiceCollection services, FakeObjectSto
     {
         client.AddMapping<TMetadata>(destination);
 
-        services.AddSingleton<IObjectBucket<TMetadata>>(
-            _ => client.GetBucket<TMetadata>());
+        // Same ownership rules as production: a metadata type mapped both here and in a fake context makes
+        // the bare bucket injection ambiguous, and repeated AddMapping for one type stays last-wins.
+        var owners = FakeObjectStorageServiceCollectionExtensions.GetOrAddOwners(services);
+        if (owners.Claim(typeof(TMetadata), typeof(FakeObjectStorageBuilder), out var currentOwner))
+        {
+            services.AddSingleton<IObjectBucket<TMetadata>>(_ => client.GetBucket<TMetadata>());
+        }
+        else
+        {
+            var message = MetadataOwners.AmbiguityMessage(typeof(TMetadata),
+                FakeObjectStorageServiceCollectionExtensions.DisplayOwner(currentOwner),
+                FakeObjectStorageServiceCollectionExtensions.DisplayOwner(typeof(FakeObjectStorageBuilder)));
+
+            services.AddSingleton<IObjectBucket<TMetadata>>(_ => throw new InvalidOperationException(message));
+        }
 
         return this;
     }

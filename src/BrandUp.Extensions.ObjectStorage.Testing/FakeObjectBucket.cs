@@ -1,3 +1,4 @@
+using System.Net;
 using BrandUp.Extensions.ObjectStorage.Internals;
 
 namespace BrandUp.Extensions.ObjectStorage;
@@ -12,13 +13,27 @@ public class FakeObjectBucket(string name, FakeObjectStore store) : IObjectBucke
         => Task.FromResult(Store.BucketExists(Name));
 
     public Task<BucketSettings> GetSettingsAsync(CancellationToken cancellationToken = default)
-        => Task.FromResult(Store.GetSettings(Name));
+    {
+        RequireBucket();
+        return Task.FromResult(Store.GetSettings(Name));
+    }
 
     public Task UpdateSettingsAsync(Action<BucketSettings> configure, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(configure);
+
+        RequireBucket();
         Store.UpdateSettings(Name, configure);
         return Task.CompletedTask;
+    }
+
+    /// <summary>Same shape as a real provider when the bucket does not exist (404 NoSuchBucket).</summary>
+    private protected void RequireBucket()
+    {
+        if (!Store.BucketExists(Name))
+            throw new ObjectStorageException(
+                $"Bucket '{Name}' does not exist.", HttpStatusCode.NotFound, "NoSuchBucket",
+                new InvalidOperationException($"Bucket '{Name}' does not exist."));
     }
 }
 
@@ -51,6 +66,11 @@ public class FakeObjectBucket<TMetadata, TKey>(string name, string? prefix, Fake
     {
         ArgumentNullException.ThrowIfNull(metadata);
         ArgumentNullException.ThrowIfNull(content);
+
+        // Production uploads fail with NoSuchBucket; a silently auto-created bucket would hide exactly the
+        // kind of missing-provisioning bug the fake exists to catch. Find/Read/Delete stay lenient (null/false),
+        // matching the real client.
+        RequireBucket();
 
         byte[] bytes;
         if (content.CanSeek)

@@ -10,7 +10,7 @@ public class TypedKeyTests
     {
         var services = new ServiceCollection();
         services.AddFakeObjectStorage<DocumentStorage>()
-            .WithBucket("reports").WithBucket("pages").WithBucket("invoices").WithBucket("photos");
+            .WithBucket("reports").WithBucket("pages").WithBucket("invoices").WithBucket("photos").WithBucket("scans");
 
         return services.BuildServiceProvider();
     }
@@ -120,6 +120,25 @@ public class TypedKeyTests
     }
 
     [Fact]
+    public async Task ExplicitGuidKeyedProperty_GetsRichHistoricShape()
+    {
+        using var sp = Build();
+        var storage = sp.GetRequiredService<DocumentStorage>();
+        var id = Guid.NewGuid();
+
+        // A property declared as IObjectBucket<TM, Guid> receives the same rich implementation as
+        // IObjectBucket<TM>: both facade accessors work, DI resolves the exact property type, and items
+        // come back as the historic ObjectItem<TM>.
+        Assert.Same(storage.Scans, storage.Bucket<ScanMetadata>());
+        Assert.Same(storage.Scans, storage.Bucket<ScanMetadata, Guid>());
+        Assert.Same(storage.Scans, sp.GetRequiredService<IObjectBucket<ScanMetadata, Guid>>());
+
+        var item = await storage.Scans.UploadAsync(id, new ScanMetadata(), new MemoryStream([1]));
+        Assert.IsType<ObjectItem<ScanMetadata>>(item);
+        Assert.Equal(id, item.Id);
+    }
+
+    [Fact]
     public void UnsupportedKeyType_FailsAtRegistration()
     {
         var services = new ServiceCollection();
@@ -132,6 +151,7 @@ public class TypedKeyTests
     public class PageMetadata : IObjectMetadata { public string? Title { get; set; } }
     public class InvoiceMetadata : IObjectMetadata { }
     public class PhotoMetadata : IObjectMetadata { }
+    public class ScanMetadata : IObjectMetadata { }
 
     [ObjectKeyFormat("{UserId}/{Number}", Extension = ".json")]
     public sealed class ReportKey : ObjectKey
@@ -153,6 +173,9 @@ public class TypedKeyTests
 
         [Bucket("photos")]
         public IObjectBucket<PhotoMetadata> Photos { get; private set; } = null!;
+
+        [Bucket("scans")]
+        public IObjectBucket<ScanMetadata, Guid> Scans { get; private set; } = null!;
     }
 
     public class BrokenStorage : ObjectStorageContext
