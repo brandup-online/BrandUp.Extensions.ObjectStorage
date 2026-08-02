@@ -262,6 +262,66 @@ public class FakeStorageContextTests
     }
 
     [Fact]
+    public async Task CrossTypeRead_MirrorsSchemaEvolution()
+    {
+        // Two mappings on one destination: written with the narrow type, read through the extended one —
+        // production fills matching properties and leaves the rest default; the fake must do the same
+        // instead of throwing InvalidCastException.
+        var services = new ServiceCollection();
+        services.AddFakeObjectStorage()
+            .AddMapping<PhotoMetadata>("files")
+            .AddMapping<ExtendedPhotoMetadata>("files")
+            .WithBucket("files");
+
+        using var sp = services.BuildServiceProvider();
+        var client = sp.GetRequiredService<IObjectStorageClient>();
+        var id = Guid.NewGuid();
+
+        await client.GetBucket<PhotoMetadata>().UploadAsync(id, new PhotoMetadata { FileName = "a.jpg" },
+            new MemoryStream([1]));
+
+        var extended = await client.GetBucket<ExtendedPhotoMetadata>().FindOneAsync(id);
+        Assert.NotNull(extended);
+        Assert.Equal("a.jpg", extended.Metadata.FileName);
+        Assert.Equal(0, extended.Metadata.Version);
+    }
+
+    [Fact]
+    public async Task RawBucketNames_AreCaseSensitive_LikeS3()
+    {
+        var services = new ServiceCollection();
+        services.AddFakeObjectStorage<MediaStorage>().WithBucket("photos");
+
+        using var sp = services.BuildServiceProvider();
+        var client = sp.GetRequiredService<MediaStorage>().Client;
+
+        // S3 bucket names are lowercase-only: an uppercase name never matches anything.
+        Assert.True(await client.GetBucket("photos").ExistsAsync());
+        Assert.False(await client.GetBucket("Photos").ExistsAsync());
+        await Assert.ThrowsAsync<ObjectStorageException>(() => client.DropBucketAsync("PHOTOS"));
+    }
+
+    [Fact]
+    public async Task PresignedUrl_LongerThanSevenDays_Throws()
+    {
+        var services = new ServiceCollection();
+        services.AddFakeObjectStorage<MediaStorage>().WithBucket("photos");
+
+        using var sp = services.BuildServiceProvider();
+        var storage = sp.GetRequiredService<MediaStorage>();
+
+        // SigV4 caps presigned URLs at 7 days; the fake enforces the same limit as production.
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => storage.Photos.GetPresignedReadUrlAsync(Guid.NewGuid(), TimeSpan.FromDays(8)));
+    }
+
+    public class ExtendedPhotoMetadata : IObjectMetadata
+    {
+        public string? FileName { get; set; }
+        public int Version { get; set; }
+    }
+
+    [Fact]
     public void SeparateContexts_HaveSeparateStores()
     {
         var services = new ServiceCollection();

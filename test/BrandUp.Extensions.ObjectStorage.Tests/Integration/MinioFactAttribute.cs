@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+
 namespace BrandUp.Extensions.ObjectStorage.Integration;
 
 /// <summary>
@@ -7,7 +9,10 @@ namespace BrandUp.Extensions.ObjectStorage.Integration;
 /// </summary>
 public sealed class MinioFactAttribute : FactAttribute
 {
-    public MinioFactAttribute()
+    public MinioFactAttribute(
+        [CallerFilePath] string? sourceFilePath = null,
+        [CallerLineNumber] int sourceLineNumber = -1)
+        : base(sourceFilePath, sourceLineNumber)
     {
         if (!MinioEnvironment.IsConfigured)
             Skip = MinioEnvironment.SkipReason;
@@ -19,7 +24,10 @@ public sealed class MinioFactAttribute : FactAttribute
 /// </summary>
 public sealed class MinioTheoryAttribute : TheoryAttribute
 {
-    public MinioTheoryAttribute()
+    public MinioTheoryAttribute(
+        [CallerFilePath] string? sourceFilePath = null,
+        [CallerLineNumber] int sourceLineNumber = -1)
+        : base(sourceFilePath, sourceLineNumber)
     {
         if (!MinioEnvironment.IsConfigured)
             Skip = MinioEnvironment.SkipReason;

@@ -392,6 +392,39 @@ public class StorageContextTests
     }
 
     [Fact]
+    public void ValidateOnStart_False_DefersValidationToFirstUse()
+    {
+        var services = new ServiceCollection();
+
+        // Deliberately invalid options (no ServiceUrl): a worker whose storage is optional.
+        services.AddObjectStorage<MediaStorage>(o => { }, validateOnStart: false);
+
+        using var sp = services.BuildServiceProvider();
+
+        // Host start does not touch the options: either no startup validator was registered at all,
+        // or it has nothing to validate for this connection.
+        var startupValidator = sp.GetService<IStartupValidator>();
+        if (startupValidator is not null)
+            startupValidator.Validate();
+
+        // Validation still guards actual use.
+        Assert.Throws<OptionsValidationException>(() =>
+            sp.GetRequiredService<IOptionsMonitor<ObjectStorageOptions>>().Get(typeof(MediaStorage).FullName));
+    }
+
+    [Fact]
+    public void ValidateOnStart_Default_FailsEagerly()
+    {
+        var services = new ServiceCollection();
+        services.AddObjectStorage<MediaStorage>(o => { });
+
+        using var sp = services.BuildServiceProvider();
+
+        var startupValidator = sp.GetRequiredService<IStartupValidator>();
+        Assert.Throws<OptionsValidationException>(startupValidator.Validate);
+    }
+
+    [Fact]
     public void NoCredentials_ValidationFailsForThatConnectionOnly()
     {
         var services = new ServiceCollection();

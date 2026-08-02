@@ -7,7 +7,9 @@ namespace BrandUp.Extensions.ObjectStorage;
 public class FakeObjectStore
 {
     readonly object _sync = new();
-    readonly Dictionary<string, FakeBucketData> _buckets = new(StringComparer.OrdinalIgnoreCase);
+    // Ordinal, like S3: bucket "Media" cannot exist (S3 names are lowercase-only), so a raw
+    // GetBucket("Media") misses — same as production would.
+    readonly Dictionary<string, FakeBucketData> _buckets = new(StringComparer.Ordinal);
 
     #region Public inspection API
 
@@ -69,10 +71,26 @@ public class FakeObjectStore
             configure(GetBucket(bucketName).Settings);
     }
 
-    public void PutObject(string bucketName, string key, byte[] content, object metadata)
+    public void PutObject(string bucketName, string key, byte[] content, object metadata, UploadOptions? options = null)
     {
         lock (_sync)
-            GetOrCreateBucket(bucketName).Objects[key] = new FakeStoredObject(content, metadata);
+            GetOrCreateBucket(bucketName).Objects[key] = new FakeStoredObject(content, metadata, options);
+    }
+
+    internal IReadOnlyList<ObjectListItem> ListObjects(string bucketName, string? prefix)
+    {
+        lock (_sync)
+        {
+            if (!_buckets.TryGetValue(bucketName, out var bucket))
+                return [];
+
+            // S3 lists keys in lexicographic order.
+            return bucket.Objects
+                .Where(kv => prefix is null || kv.Key.StartsWith(prefix, StringComparison.Ordinal))
+                .OrderBy(kv => kv.Key, StringComparer.Ordinal)
+                .Select(kv => new ObjectListItem(kv.Key, kv.Value.Size, kv.Value.ETag, kv.Value.LastModified))
+                .ToList();
+        }
     }
 
     internal FakeStoredObject? GetObject(string bucketName, string key)
@@ -122,17 +140,19 @@ internal sealed class FakeBucketData(BucketSettings settings)
     public Dictionary<string, FakeStoredObject> Objects { get; } = new(StringComparer.Ordinal);
 }
 
-internal sealed class FakeStoredObject(byte[] content, object metadata)
+internal sealed class FakeStoredObject(byte[] content, object metadata, UploadOptions? uploadOptions = null)
 {
     public byte[] Content { get; } = content;
     public object Metadata { get; } = metadata;
+    public UploadOptions? UploadOptions { get; } = uploadOptions;
+    public DateTimeOffset LastModified { get; } = DateTimeOffset.UtcNow;
     public long Size => Content.Length;
     public string ETag { get; } = ComputeETag(content);
 
     static string ComputeETag(byte[] data)
     {
         using var md5 = System.Security.Cryptography.MD5.Create();
-        return $"\"{Convert.ToHexString(md5.ComputeHash(data)).ToLower()}\"";
+        return $"\"{Convert.ToHexString(md5.ComputeHash(data)).ToLowerInvariant()}\"";
     }
 }
 

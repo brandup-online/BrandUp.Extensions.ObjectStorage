@@ -57,46 +57,64 @@ internal class S3Client : IS3Client, IDisposable
 
     #region Object operations
 
-    public async Task<S3StorageObject> UploadAsync(string bucketName, string objectKey, IDictionary<string, string> metadata, Stream stream, CancellationToken cancellationToken)
+    // Mutable so integration tests can shrink them; S3 requires parts of at least 5 MB (except the last).
+    internal static int MultipartPartSize = 16 * 1024 * 1024;
+    internal static long MultipartThreshold = 64L * 1024 * 1024;
+
+    // S3 rejects PartNumber > 10000, so the part size scales up for very large seekable payloads.
+    internal const int MaxParts = 10_000;
+
+    internal static int ComputePartSize(long contentLength)
+        => (int)Math.Max(MultipartPartSize, (contentLength + MaxParts - 1) / MaxParts);
+
+    public async Task<S3StorageObject> UploadAsync(string bucketName, string objectKey, IDictionary<string, string> metadata, Stream stream, UploadOptions? options, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(bucketName);
         ArgumentException.ThrowIfNullOrEmpty(objectKey);
         ArgumentNullException.ThrowIfNull(metadata);
         ArgumentNullException.ThrowIfNull(stream);
 
-        MemoryStream? buffer = null;
-        Stream uploadStream;
-        long contentLength;
-
         if (stream.CanSeek)
         {
-            uploadStream = stream;
-            contentLength = stream.Length - stream.Position;
+            // Empty objects are legal in S3 (markers, placeholders) and go through the simple path.
+            var contentLength = stream.Length - stream.Position;
+            if (contentLength <= MultipartThreshold)
+                return await PutObjectAsync(bucketName, objectKey, metadata, stream, contentLength, options, cancellationToken);
+
+            return await MultipartUploadAsync(bucketName, objectKey, metadata, options,
+                Parts(new byte[ComputePartSize(contentLength)], firstRead: 0, stream, cancellationToken), cancellationToken);
         }
-        else
+
+        // Non-seekable: read the first part; a stream shorter than one part takes the simple path, so memory
+        // is bounded by the part size instead of the whole payload.
+        var buffer = new byte[MultipartPartSize];
+        var read = await ReadUpToAsync(stream, buffer, cancellationToken);
+
+        if (read < buffer.Length)
         {
-            buffer = new MemoryStream();
-            await stream.CopyToAsync(buffer, cancellationToken);
-            buffer.Seek(0, SeekOrigin.Begin);
-            uploadStream = buffer;
-            contentLength = buffer.Length;
+            using var single = new MemoryStream(buffer, 0, read, writable: false);
+            return await PutObjectAsync(bucketName, objectKey, metadata, single, read, options, cancellationToken);
         }
 
-        if (contentLength == 0)
-            throw new InvalidOperationException("Stream contains no data.");
+        return await MultipartUploadAsync(bucketName, objectKey, metadata, options,
+            Parts(buffer, read, stream, cancellationToken), cancellationToken);
+    }
 
+    async Task<S3StorageObject> PutObjectAsync(string bucketName, string objectKey, IDictionary<string, string> metadata, Stream stream, long contentLength, UploadOptions? options, CancellationToken cancellationToken)
+    {
         try
         {
             var request = new PutObjectRequest
             {
                 BucketName = bucketName,
                 Key = objectKey,
-                InputStream = uploadStream,
+                InputStream = stream,
+                AutoCloseStream = false,
                 DisableDefaultChecksumValidation = true
             };
 
-            foreach (var kv in metadata)
-                request.Metadata.Add(EncodeMetadataKey(kv.Key), EncodeMetadataValue(kv.Value));
+            ApplyOptions(request.Headers, options);
+            ApplyMetadata(request.Metadata, metadata);
 
             var response = await _s3.PutObjectAsync(request, cancellationToken);
 
@@ -106,9 +124,218 @@ internal class S3Client : IS3Client, IDisposable
         {
             throw new ObjectStorageException(ex.Message, ex.StatusCode, ex);
         }
-        finally
+    }
+
+    /// <summary>
+    /// Splits any stream into parts over one shared buffer. Parts are consumed strictly sequentially
+    /// (each UploadPart completes before the next part is read), so a single buffer serves the whole
+    /// upload — no per-part LOH allocations. Do not parallelize part uploads without revisiting this.
+    /// Buffering also keeps the SDK away from the caller's stream: UploadPart offers no AutoCloseStream
+    /// and no exact-read guarantee, so feeding it the source directly is not safe.
+    /// </summary>
+    static async IAsyncEnumerable<MemoryStream> Parts(
+        byte[] buffer, int firstRead, Stream stream, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        if (firstRead > 0)
+            yield return new MemoryStream(buffer, 0, firstRead, writable: false);
+
+        while (true)
         {
-            buffer?.Dispose();
+            var read = await ReadUpToAsync(stream, buffer, cancellationToken);
+            if (read == 0)
+                yield break;
+
+            yield return new MemoryStream(buffer, 0, read, writable: false);
+        }
+    }
+
+    async Task<S3StorageObject> MultipartUploadAsync(
+        string bucketName, string objectKey, IDictionary<string, string> metadata, UploadOptions? options,
+        IAsyncEnumerable<MemoryStream> parts, CancellationToken cancellationToken)
+    {
+        string? uploadId = null;
+        try
+        {
+            var initiate = new InitiateMultipartUploadRequest { BucketName = bucketName, Key = objectKey };
+            ApplyOptions(initiate.Headers, options);
+            ApplyMetadata(initiate.Metadata, metadata);
+
+            uploadId = (await _s3.InitiateMultipartUploadAsync(initiate, cancellationToken)).UploadId;
+
+            var etags = new List<PartETag>();
+            long uploaded = 0;
+            var partNumber = 1;
+
+            await foreach (var content in parts)
+            {
+                if (partNumber > MaxParts)
+                    throw new InvalidOperationException(
+                        $"Object exceeds the S3 limit of {MaxParts} multipart parts. With a non-seekable " +
+                        $"stream the part size is fixed at {MultipartPartSize} bytes; supply a seekable " +
+                        "stream so the part size can scale with the payload.");
+
+                using (content)
+                {
+                    var part = await _s3.UploadPartAsync(new UploadPartRequest
+                    {
+                        BucketName = bucketName,
+                        Key = objectKey,
+                        UploadId = uploadId,
+                        PartNumber = partNumber,
+                        PartSize = content.Length,
+                        InputStream = content,
+                        DisableDefaultChecksumValidation = true
+                    }, cancellationToken);
+
+                    etags.Add(new PartETag(partNumber, part.ETag));
+                    uploaded += content.Length;
+                    partNumber++;
+                }
+            }
+
+            var completed = await _s3.CompleteMultipartUploadAsync(new CompleteMultipartUploadRequest
+            {
+                BucketName = bucketName,
+                Key = objectKey,
+                UploadId = uploadId,
+                PartETags = etags
+            }, cancellationToken);
+
+            return new S3StorageObject(objectKey, uploaded, completed.ETag, metadata);
+        }
+        catch (AmazonS3Exception ex)
+        {
+            await AbortSafeAsync();
+            throw new ObjectStorageException(ex.Message, ex.StatusCode, ex);
+        }
+        catch
+        {
+            await AbortSafeAsync();
+            throw;
+        }
+
+        // Best-effort cleanup: an abandoned multipart upload keeps storing (and billing) its parts.
+        async Task AbortSafeAsync()
+        {
+            if (uploadId is null)
+                return;
+
+            try
+            {
+                await _s3.AbortMultipartUploadAsync(new AbortMultipartUploadRequest
+                {
+                    BucketName = bucketName,
+                    Key = objectKey,
+                    UploadId = uploadId
+                }, CancellationToken.None);
+            }
+            catch
+            {
+                // the original failure matters more
+            }
+        }
+    }
+
+    static async Task<int> ReadUpToAsync(Stream stream, byte[] buffer, CancellationToken cancellationToken)
+    {
+        var total = 0;
+        while (total < buffer.Length)
+        {
+            var read = await stream.ReadAsync(buffer.AsMemory(total), cancellationToken);
+            if (read == 0)
+                break;
+            total += read;
+        }
+
+        return total;
+    }
+
+    static void ApplyMetadata(MetadataCollection target, IDictionary<string, string> metadata)
+    {
+        foreach (var kv in metadata)
+            target.Add(EncodeMetadataKey(kv.Key), EncodeMetadataValue(kv.Value));
+    }
+
+    static void ApplyOptions(HeadersCollection headers, UploadOptions? options)
+    {
+        if (options is null)
+            return;
+
+        if (!string.IsNullOrEmpty(options.ContentType))
+            headers.ContentType = options.ContentType;
+        if (!string.IsNullOrEmpty(options.CacheControl))
+            headers.CacheControl = options.CacheControl;
+        if (!string.IsNullOrEmpty(options.ContentDisposition))
+            headers.ContentDisposition = options.ContentDisposition;
+    }
+
+    public async IAsyncEnumerable<ObjectListItem> ListObjectsAsync(
+        string bucketName, string? prefix, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(bucketName);
+
+        string? continuationToken = null;
+        do
+        {
+            ListObjectsV2Response response;
+            try
+            {
+                response = await _s3.ListObjectsV2Async(new ListObjectsV2Request
+                {
+                    BucketName = bucketName,
+                    Prefix = prefix,
+                    ContinuationToken = continuationToken
+                }, cancellationToken);
+            }
+            catch (AmazonS3Exception ex)
+            {
+                throw new ObjectStorageException(ex.Message, ex.StatusCode, ex.ErrorCode, ex);
+            }
+
+            foreach (var entry in response.S3Objects ?? [])
+                yield return new ObjectListItem(entry.Key, entry.Size ?? 0, entry.ETag, entry.LastModified);
+
+            continuationToken = response.IsTruncated == true ? response.NextContinuationToken : null;
+
+            // A truncated page without a token would silently yield a partial listing — fail loudly instead.
+            if (response.IsTruncated == true && continuationToken is null)
+                throw new InvalidOperationException(
+                    $"Bucket '{bucketName}' returned a truncated listing without a continuation token.");
+        }
+        while (continuationToken is not null);
+    }
+
+    public async Task<Uri> GetPresignedUrlAsync(
+        string bucketName, string objectKey, TimeSpan expiresIn, bool forWrite, string? contentType, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(bucketName);
+        ArgumentException.ThrowIfNullOrEmpty(objectKey);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(expiresIn, TimeSpan.Zero);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(expiresIn, PresignedUrlLimits.MaxLifetime);
+
+        var request = new GetPreSignedUrlRequest
+        {
+            BucketName = bucketName,
+            Key = objectKey,
+            Verb = forWrite ? HttpVerb.PUT : HttpVerb.GET,
+            Expires = DateTime.UtcNow.Add(expiresIn)
+        };
+
+        if (forWrite && !string.IsNullOrEmpty(contentType))
+            request.ContentType = contentType;
+
+        // The SDK presigns for HTTPS by default; follow the scheme of the configured endpoint (MinIO is
+        // typically plain http in development).
+        if (_s3.Config.ServiceURL?.StartsWith("http://", StringComparison.OrdinalIgnoreCase) == true)
+            request.Protocol = Protocol.HTTP;
+
+        try
+        {
+            return new Uri(await _s3.GetPreSignedURLAsync(request));
+        }
+        catch (AmazonS3Exception ex)
+        {
+            throw new ObjectStorageException(ex.Message, ex.StatusCode, ex.ErrorCode, ex);
         }
     }
 
@@ -126,11 +353,14 @@ internal class S3Client : IS3Client, IDisposable
                 Key = objectKey
             }, cancellationToken);
 
+            // Keys absent on the object are omitted, not null-filled: deserialization then leaves the
+            // property at its default, so objects written before a metadata property existed stay readable.
             var metadata = new Dictionary<string, string>();
             foreach (var key in metadataKeys)
             {
                 var encodedValue = response.Metadata[EncodeMetadataKey(key)];
-                metadata[key] = encodedValue != null ? DecodeMetadataValue(encodedValue) : null!;
+                if (encodedValue != null)
+                    metadata[key] = DecodeMetadataValue(encodedValue);
             }
 
             return new S3StorageObject(objectKey, response.ContentLength, response.ETag, metadata);
@@ -432,15 +662,26 @@ internal class S3Client : IS3Client, IDisposable
             : null
     };
 
+    static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> EncodedKeyCache = new();
+
     internal static string EncodeMetadataKey(string key)
     {
         ArgumentException.ThrowIfNullOrEmpty(key);
-        return TrainCaseRegex.Replace(key, "-$1").Replace('_', '-').Replace("--", "-").Trim().ToLower();
+        return EncodedKeyCache.GetOrAdd(key,
+            static k => TrainCaseRegex.Replace(k, "-$1").Replace('_', '-').Replace("--", "-").Trim().ToLowerInvariant());
     }
 
     internal static string EncodeMetadataValue(string value)
     {
         ArgumentNullException.ThrowIfNull(value);
+
+        // S3 caps user metadata at 2 KB per object and hex doubles every byte, so ASCII-safe values travel
+        // as-is. The plaintext must never be something the decoder would parse as hex (e.g. "25", "DEAD") —
+        // such values stay hex-encoded, which keeps the two formats unambiguous without any marker. Older
+        // library versions read the plaintext too: their decoder has the same fall-back-to-original branch.
+        if (IsHeaderSafe(value) && !LooksLikeHex(value))
+            return value;
+
         return Convert.ToHexString(System.Text.Encoding.UTF8.GetBytes(value));
     }
 
@@ -455,6 +696,46 @@ internal class S3Client : IS3Client, IDisposable
         {
             return value;
         }
+    }
+
+    /// <summary>Printable ASCII with no outer or consecutive spaces — survives an HTTP header byte-for-byte.</summary>
+    static bool IsHeaderSafe(string value)
+    {
+        if (value.Length == 0)
+            return false;   // keep the historic empty-value round-trip through the hex path
+
+        if (value[0] == ' ' || value[^1] == ' ')
+            return false;   // HTTP trims outer whitespace of header values
+
+        var previousWasSpace = false;
+        foreach (var c in value)
+        {
+            if (c < 0x20 || c > 0x7E)
+                return false;
+
+            // Header-normalizing intermediaries may collapse runs of spaces — encode such values instead.
+            if (c == ' ' && previousWasSpace)
+                return false;
+
+            previousWasSpace = c == ' ';
+        }
+
+        return true;
+    }
+
+    /// <summary>Exactly what <see cref="Convert.FromHexString(string)"/> accepts: even length, hex digits only.</summary>
+    static bool LooksLikeHex(string value)
+    {
+        if (value.Length % 2 != 0)
+            return false;
+
+        foreach (var c in value)
+        {
+            if (!Uri.IsHexDigit(c))
+                return false;
+        }
+
+        return true;
     }
 
     #endregion

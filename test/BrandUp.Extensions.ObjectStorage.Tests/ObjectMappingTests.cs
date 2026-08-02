@@ -8,7 +8,7 @@ public class ObjectMappingTests
     [InlineData("mybucket", "mybucket", null)]
     [InlineData("mybucket/prefix", "mybucket", "prefix")]
     [InlineData("mybucket/sub/prefix", "mybucket", "sub/prefix")]
-    [InlineData("MyBucket/Prefix", "mybucket", "prefix")]
+    [InlineData("MyBucket/Prefix", "mybucket", "Prefix")]   // bucket lowered, prefix case kept
     public void Create_ParsesDestination(string destination, string expectedBucket, string? expectedPrefix)
     {
         var mapping = ObjectMapping.Create(typeof(PersonMetadata), destination);
@@ -32,11 +32,50 @@ public class ObjectMappingTests
     }
 
     [Fact]
-    public void GetObjectKey_WithPrefix_PrefixesWithUnderscore()
+    public void GetObjectKey_WithPrefix_JoinsWithSlash()
     {
         var mapping = ObjectMapping.Create(typeof(PersonMetadata), "bucket/items");
         var id = Guid.NewGuid().ToString("d");
-        Assert.Equal($"items_{id}", mapping.GetObjectKey(id));
+        Assert.Equal($"items/{id}", mapping.GetObjectKey(id));
+    }
+
+    [Fact]
+    public void Create_KeepsPrefixCase_LowersBucketOnly()
+    {
+        var mapping = ObjectMapping.Create(typeof(PersonMetadata), "MyBucket/Photos/2026");
+        Assert.Equal("mybucket", mapping.BucketName);
+        Assert.Equal($"Photos/2026/x", mapping.GetObjectKey("x"));
+    }
+
+    [Fact]
+    public void Deserialize_MissingKeys_LeaveDefaults()
+    {
+        // Schema evolution: an object stored before Age/IsActive existed must stay readable.
+        var mapping = ObjectMapping.Create(typeof(PersonMetadata), "bucket");
+        var data = new Dictionary<string, string> { [nameof(PersonMetadata.Name)] = "Alice" };
+
+        var restored = (PersonMetadata)mapping.Deserialize(data);
+
+        Assert.Equal("Alice", restored.Name);
+        Assert.Equal(0, restored.Age);
+        Assert.False(restored.IsActive);
+        Assert.Null(restored.BirthDate);
+    }
+
+    [Fact]
+    public void Deserialize_NullValue_LeavesDefault_EvenForValueType()
+    {
+        var mapping = ObjectMapping.Create(typeof(PersonMetadata), "bucket");
+        var data = new Dictionary<string, string>
+        {
+            [nameof(PersonMetadata.Name)] = null!,
+            [nameof(PersonMetadata.Age)] = null!
+        };
+
+        var restored = (PersonMetadata)mapping.Deserialize(data);
+
+        Assert.Null(restored.Name);
+        Assert.Equal(0, restored.Age);
     }
 
     [Fact]

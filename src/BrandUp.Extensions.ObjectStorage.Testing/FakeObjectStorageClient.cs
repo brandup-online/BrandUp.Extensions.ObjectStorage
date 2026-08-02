@@ -16,16 +16,20 @@ public class FakeObjectStorageClient(FakeObjectStore store) : IObjectStorageClie
         ArgumentNullException.ThrowIfNull(metadataType);
 
         // Same rules as the real AddMapping path, so the fake rejects what production would reject;
-        // lower-casing mirrors ObjectMapping.Create.
-        destination = DestinationValidator.Normalize(destination, nameof(destination)).ToLower();
+        // bucket-only lower-casing mirrors ObjectMapping.Create (object key prefixes are case-sensitive).
+        var (bucketName, prefix) = DestinationValidator.Split(
+            DestinationValidator.Normalize(destination, nameof(destination)));
 
-        _mappings[metadataType] = DestinationValidator.Split(destination);
+        _mappings[metadataType] = (bucketName.ToLowerInvariant(), prefix);
     }
 
     public IObjectBucket GetBucket(string bucketName)
     {
         ArgumentException.ThrowIfNullOrEmpty(bucketName);
-        return new FakeObjectBucket(bucketName.ToLower(), store);
+
+        // Name is taken verbatim, like production: an uppercase bucket name simply never matches
+        // anything, because S3 bucket names are lowercase-only.
+        return new FakeObjectBucket(bucketName, store);
     }
 
     public IObjectBucket<TMetadata> GetBucket<TMetadata>()
@@ -64,7 +68,7 @@ public class FakeObjectStorageClient(FakeObjectStore store) : IObjectStorageClie
 
         try
         {
-            store.CreateBucket(bucketName.ToLower(), settings);
+            store.CreateBucket(bucketName, settings);
         }
         catch (InvalidOperationException e)
         {
@@ -85,7 +89,7 @@ public class FakeObjectStorageClient(FakeObjectStore store) : IObjectStorageClie
                 $"Bucket '{bucketName}' does not exist.", HttpStatusCode.NotFound, "NoSuchBucket",
                 new InvalidOperationException($"Bucket '{bucketName}' does not exist."));
 
-        store.DropBucket(bucketName.ToLower());
+        store.DropBucket(bucketName);
         return Task.CompletedTask;
     }
 }

@@ -69,7 +69,7 @@ public static class ObjectStorageJsonExtensions
         ArgumentNullException.ThrowIfNull(metadata);
 
         using var stream = await SerializeAsync(content, options, cancellationToken);
-        return await bucket.UploadAsync(objectId, metadata, stream, cancellationToken);
+        return await bucket.UploadAsync(objectId, metadata, stream, JsonUploadOptions, cancellationToken);
     }
 
     #endregion
@@ -106,10 +106,15 @@ public static class ObjectStorageJsonExtensions
         ArgumentNullException.ThrowIfNull(metadata);
 
         using var stream = await SerializeAsync(content, options, cancellationToken);
-        return await bucket.UploadAsync(objectId, metadata, stream, cancellationToken);
+        return await bucket.UploadAsync(objectId, metadata, stream, JsonUploadOptions, cancellationToken);
     }
 
     #endregion
+
+    // JSON uploads through a bucket are served back as JSON; the IObjectStorageContext facade has no
+    // options channel and keeps the historic behavior. A fresh instance per call: the fake stores the
+    // reference, and a shared mutable instance could be corrupted through it.
+    static UploadOptions JsonUploadOptions => new() { ContentType = "application/json" };
 
     static async Task<TContent?> DeserializeAsync<TContent>(
         Stream? stream, JsonSerializerOptions? options, CancellationToken cancellationToken)

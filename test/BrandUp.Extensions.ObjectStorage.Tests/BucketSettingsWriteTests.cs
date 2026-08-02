@@ -120,7 +120,11 @@ public class BucketSettingsWriteTests
         public Task DeleteBucketAsync(string bucketName, CancellationToken ct) => throw new NotSupportedException();
         public Task<IReadOnlyList<BucketInfo>> ListBucketsAsync(CancellationToken ct) => throw new NotSupportedException();
 
-        public Task<S3StorageObject> UploadAsync(string bucketName, string objectKey, IDictionary<string, string> metadata, Stream stream, CancellationToken ct)
+        public Task<S3StorageObject> UploadAsync(string bucketName, string objectKey, IDictionary<string, string> metadata, Stream stream, UploadOptions? options, CancellationToken ct)
+            => throw new NotSupportedException();
+        public IAsyncEnumerable<ObjectListItem> ListObjectsAsync(string bucketName, string? prefix, CancellationToken ct)
+            => throw new NotSupportedException();
+        public Task<Uri> GetPresignedUrlAsync(string bucketName, string objectKey, TimeSpan expiresIn, bool forWrite, string? contentType, CancellationToken ct)
             => throw new NotSupportedException();
         public Task<S3StorageObject?> FindAsync(string bucketName, string objectKey, IEnumerable<string> metadataKeys, CancellationToken ct)
             => throw new NotSupportedException();

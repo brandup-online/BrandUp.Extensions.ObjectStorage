@@ -33,6 +33,11 @@ public class S3ClientEncodingTests
     [InlineData("привет мир")]
     [InlineData("special chars: !@#$%")]
     [InlineData("")]
+    [InlineData("DEAD")]        // valid hex both upper- and lowercase — must survive the round trip
+    [InlineData("cafe")]
+    [InlineData("25")]          // even-length digits parse as hex too
+    [InlineData("  padded  ")]  // outer spaces would be trimmed by HTTP
+    [InlineData("photo.jpg")]
     public void EncodeDecodeValue_RoundTrip(string value)
     {
         var encoded = S3Client.EncodeMetadataValue(value);
@@ -40,11 +45,28 @@ public class S3ClientEncodingTests
         Assert.Equal(value, decoded);
     }
 
-    [Fact]
-    public void EncodeMetadataValue_ProducesHexString()
+    [Theory]
+    [InlineData("photo.jpg")]
+    [InlineData("text/plain")]
+    [InlineData("special chars: !@#$%")]
+    [InlineData("123")]   // odd length — the hex decoder rejects it, so plaintext is safe
+    public void EncodeMetadataValue_AsciiSafeValue_PassesThroughAsIs(string value)
     {
-        var encoded = S3Client.EncodeMetadataValue("test");
-        Assert.Matches("^[0-9A-F]+$", encoded);
+        Assert.Equal(value, S3Client.EncodeMetadataValue(value));
+    }
+
+    [Theory]
+    [InlineData("пример.txt")]   // non-ASCII
+    [InlineData("DEAD")]         // hex look-alike: written as-is it would be hex-decoded on read
+    [InlineData("25")]
+    [InlineData(" padded")]      // outer space would not survive an HTTP header
+    [InlineData("tab\there")]    // control character
+    [InlineData("a  b")]         // consecutive spaces may be collapsed by header-normalizing hops
+    public void EncodeMetadataValue_UnsafeOrAmbiguousValue_IsHexEncoded(string value)
+    {
+        var encoded = S3Client.EncodeMetadataValue(value);
+        Assert.NotEqual(value, encoded);
+        Assert.Matches("^[0-9A-F]*$", encoded);
     }
 
     [Fact]
@@ -53,5 +75,17 @@ public class S3ClientEncodingTests
         // fallback for legacy values not in hex format
         var result = S3Client.DecodeMetadataValue("plaintext-value");
         Assert.Equal("plaintext-value", result);
+    }
+
+    [Fact]
+    public void ComputePartSize_ScalesToFitTenThousandParts()
+    {
+        // Small payloads keep the default part; a 5 TB payload needs ~550 MB parts to fit 10 000.
+        Assert.Equal(S3Client.MultipartPartSize, S3Client.ComputePartSize(100L * 1024 * 1024));
+
+        var fiveTb = 5L * 1024 * 1024 * 1024 * 1024;
+        var part = S3Client.ComputePartSize(fiveTb);
+        Assert.True((long)part * S3Client.MaxParts >= fiveTb);
+        Assert.True(part < 600 * 1024 * 1024);
     }
 }

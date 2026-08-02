@@ -11,12 +11,20 @@ public static class ServiceCollectionExtensions
     /// Registers the default connection together with the unnamed <see cref="IObjectStorageClient"/> and
     /// <see cref="IObjectStorageContext"/>. Map metadata types with <see cref="ObjectStorageBuilder.AddMapping{TMetadata}(string)"/>.
     /// </summary>
-    public static ObjectStorageBuilder AddObjectStorage(this IServiceCollection services, Action<ObjectStorageOptions> configure)
+    /// <param name="services">Service collection.</param>
+    /// <param name="configure">Connection options.</param>
+    /// <param name="validateOnStart">
+    /// Validate the connection options eagerly at host start (default). Pass <see langword="false"/> for
+    /// optional storage — e.g. a worker that only sometimes has the storage configured: validation then
+    /// happens lazily, on first use of the connection.
+    /// </param>
+    public static ObjectStorageBuilder AddObjectStorage(
+        this IServiceCollection services, Action<ObjectStorageOptions> configure, bool validateOnStart = true)
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(configure);
 
-        var registry = AddConnectionCore(services, Options.DefaultName, configure);
+        var registry = AddConnectionCore(services, Options.DefaultName, configure, validateOnStart);
 
         services.TryAddSingleton<IObjectStorageClient>(sp =>
         {
@@ -41,14 +49,15 @@ public static class ServiceCollectionExtensions
     /// bound to it with <see cref="AddObjectStorage{TContext}(IServiceCollection, string)"/>; several contexts
     /// sharing a name share one S3 client.
     /// </summary>
+    /// <inheritdoc cref="AddObjectStorage(IServiceCollection, Action{ObjectStorageOptions}, bool)" path="/param[@name='validateOnStart']"/>
     public static ObjectStorageConnectionBuilder AddObjectStorageConnection(
-        this IServiceCollection services, string name, Action<ObjectStorageOptions> configure)
+        this IServiceCollection services, string name, Action<ObjectStorageOptions> configure, bool validateOnStart = true)
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         ArgumentNullException.ThrowIfNull(configure);
 
-        var registry = AddConnectionCore(services, name, configure);
+        var registry = AddConnectionCore(services, name, configure, validateOnStart);
 
         return new ObjectStorageConnectionBuilder(services, registry, name);
     }
@@ -56,17 +65,17 @@ public static class ServiceCollectionExtensions
     /// <summary>
     /// Registers a storage context on its own connection, configured here. The connection is private to the
     /// context; to share one account between contexts use
-    /// <see cref="AddObjectStorageConnection(IServiceCollection, string, Action{ObjectStorageOptions})"/>.
+    /// <see cref="AddObjectStorageConnection(IServiceCollection, string, Action{ObjectStorageOptions}, bool)"/>.
     /// </summary>
     public static ObjectStorageContextBuilder<TContext> AddObjectStorage<TContext>(
-        this IServiceCollection services, Action<ObjectStorageOptions> configure)
+        this IServiceCollection services, Action<ObjectStorageOptions> configure, bool validateOnStart = true)
         where TContext : ObjectStorageContext
     {
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(configure);
 
         var connectionName = ConnectionNameOf(typeof(TContext));
-        AddConnectionCore(services, connectionName, configure);
+        AddConnectionCore(services, connectionName, configure, validateOnStart);
 
         return services.AddObjectStorage<TContext>(connectionName);
     }
@@ -160,12 +169,18 @@ public static class ServiceCollectionExtensions
         return result;
     }
 
-    static ObjectStorageRegistry AddConnectionCore(IServiceCollection services, string name, Action<ObjectStorageOptions> configure)
+    static ObjectStorageRegistry AddConnectionCore(
+        IServiceCollection services, string name, Action<ObjectStorageOptions> configure, bool validateOnStart)
     {
         var registry = GetOrAddRegistry(services);
         registry.AddConnection(name);
 
-        services.AddOptions<ObjectStorageOptions>(name).Configure(configure).ValidateOnStart();
+        // Validation itself always runs when the options are first materialized; validateOnStart only
+        // controls whether that happens eagerly at host start or lazily on first use.
+        var builder = services.AddOptions<ObjectStorageOptions>(name).Configure(configure);
+        if (validateOnStart)
+            builder.ValidateOnStart();
+
         AddCore(services);
 
         return registry;

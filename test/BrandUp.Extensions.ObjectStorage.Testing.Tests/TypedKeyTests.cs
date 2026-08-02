@@ -105,6 +105,8 @@ public class TypedKeyTests
     [InlineData("pages{1}")]
     [InlineData("100%")]
     [InlineData("a#b")]
+    [InlineData("/leading")]
+    [InlineData("a//b")]
     public async Task StringKey_WithAwsAvoidCharacter_ThrowsBeforeAnyRequest(string key)
     {
         using var sp = Build();
@@ -114,7 +116,7 @@ public class TypedKeyTests
         // before any storage call is made.
         var ex = await Assert.ThrowsAsync<ArgumentException>(
             () => storage.Pages.UploadAsync(key, new PageMetadata(), new MemoryStream([1])));
-        Assert.Contains("characters to avoid", ex.Message);
+        Assert.Contains("Object key", ex.Message);
 
         await Assert.ThrowsAsync<ArgumentException>(() => storage.Pages.FindOneAsync(key));
     }

@@ -64,6 +64,14 @@ internal static class ObjectKeySerializer
         if (string.IsNullOrWhiteSpace(key))
             throw new ArgumentException("Object key cannot be empty.", nameof(key));
 
+        // A leading '/' or an empty segment ("//") silently produces a different S3 "folder" than intended,
+        // especially now that mapping prefixes join with '/'. A trailing '/' stays legal: folder markers.
+        if (key[0] == '/')
+            throw new ArgumentException($"Object key '{key}' must not start with '/'.", nameof(key));
+
+        if (key.Contains("//"))
+            throw new ArgumentException($"Object key '{key}' contains an empty segment (\"//\").", nameof(key));
+
         foreach (var c in key)
         {
             if (char.IsControl(c))

@@ -28,6 +28,8 @@ public class UserPhotoMetadata : IObjectMetadata
 Любой класс с публичным конструктором без параметров и публичными свойствами с геттером и сеттером.  
 Поддерживаемые типы свойств: `string`, `int`, `bool`, `Guid`, `DateTime`, `decimal`, `enum` и любые типы с `TypeConverter`. Значения `null` при сериализации пропускаются.
 
+Метаданные хранятся в заголовках `x-amz-meta-*` (общий лимит S3 — 2 КБ на объект). ASCII-значения записываются как есть; кодируются (hex) только значения с не-ASCII символами, внешними пробелами или те, что сами выглядят как hex-строка — иначе чтение исказило бы их. Старые значения, записанные предыдущими версиями библиотеки, читаются без изменений.
+
 ### 2. Зарегистрировать в DI
 
 ```csharp
@@ -172,6 +174,15 @@ services.AddObjectStorage<ArchiveStorage>(opts => configuration.GetSection("Obje
 
 Каждое подключение валидируется отдельно: отсутствие `ServiceUrl`, региона или кредов сообщается с указанием подключения.
 
+Для воркеров с **необязательным** хранилищем жёсткую проверку на старте можно отключить — валидация тогда произойдёт лениво, при первом обращении к подключению:
+
+```csharp
+services.AddObjectStorage<MediaStorage>(opts => configuration.GetSection("ObjectStorage:Media").Bind(opts),
+    validateOnStart: false);
+```
+
+Параметр есть у `AddObjectStorage(configure)`, `AddObjectStorage<TContext>(configure)` и `AddObjectStorageConnection(name, configure)`.
+
 ### Имена бакетов из конфигурации
 
 Имя бакета и префикс ключей объектов задаются только в опциях подключения, в секции `Objects` — в коде их нет. Ключ, по которому они ищутся, объявляет атрибут: `[Bucket]` — имя свойства, `[Bucket("videos")]` — указанный ключ.
@@ -212,6 +223,8 @@ services.AddObjectStorage<MediaStorage>(opts => configuration.GetSection("Object
 Правила:
 
 - значение — `bucket` либо `bucket/prefix`: часть до первого `/` это имя бакета, остаток — префикс ключей объектов;
+- ключ объекта складывается как `prefix/id` — префикс образует обычную «папку» S3 (например `photos/1f0f…`);
+- имя бакета приводится к нижнему регистру (требование S3), **регистр префикса сохраняется** — ключи S3 регистрозависимы;
 - имя бакета = `BucketNamePrefix` + значение + `BucketNameSuffix` (префикс ключей не затрагивается);
 - сравнение ключей регистронезависимое — и в опциях, и при биндинге из конфигурации;
 - ненастроенный бакет — ошибка при создании контекста, с указанием контекста, свойства и ожидаемого ключа (`Objects:videos`);
@@ -228,6 +241,8 @@ services.AddObjectStorage<MediaStorage>(opts =>
 ```
 
 Для подключения по умолчанию (`AddMapping`) имя объявлено в коде, поэтому конфигурация не обязательна: `Objects["legacy"]` подменяет имя бакета `legacy`, а префикс/суффикс применяются в любом случае.
+
+> **Миграция с 2.0.x.** Ранние сборки 2.0 склеивали префикс с идентификатором через `_` (`photos_1f0f…`) и понижали регистр префикса. Начиная с 2.1 раскладка — `prefix/id` с сохранением регистра. Объекты, записанные старой раскладкой в бакеты с префиксом маппинга, по новым ключам не адресуются — перенесите их (копированием под новые ключи) либо оставьте такие маппинги без префикса.
 
 ### Настройки создаваемых бакетов
 
@@ -337,6 +352,16 @@ await storage.Reports.UploadJsonAsync(key, metadata, content);
 
 Для нестандартной сериализации реализуйте `IObjectKey` напрямую — единственный метод `ToKeyString()`.
 
+**Опциональные сегменты.** Пустое значение свойства — ошибка (невидимый сегмент делает разные ключи неотличимыми), поэтому «необязательная папка» выражается иначе: либо значением по умолчанию (`Folder = "root"`), либо складыванием опциональной части в соседнее свойство — одно свойство `Path`, куда попадает `"folder/name"` или просто `"name"`:
+
+```csharp
+[ObjectKeyFormat("{Path}", Extension = ".json")]
+public sealed class DocumentKey : ObjectKey
+{
+    public string Path { get; init; } = null!;   // "reports/2026/07" или просто "2026-07"
+}
+```
+
 `Bucket<TMetadata, TKey>()`, generic-перегрузки `FindAsync`/`ReadAsync`/`UploadAsync`/`DeleteAsync` на контексте и JSON-расширения работают с типизированными ключами; типизированный бакет также регистрируется в DI (`IObjectBucket<PageMetadata, string>`).
 
 ### Обратная совместимость
@@ -384,8 +409,30 @@ await bucket.UpdateSettingsAsync(s =>
 |---|---|
 | `FindOneAsync(TKey, CancellationToken)` | Метаданные объекта. `null` если не найден. |
 | `OpenReadAsync(TKey, CancellationToken)` | Поток содержимого. `null` если не найден. |
-| `UploadAsync(TKey, TMetadata, Stream, CancellationToken)` | Загрузить объект. |
+| `UploadAsync(TKey, TMetadata, Stream, [UploadOptions], CancellationToken)` | Загрузить объект. `UploadOptions` задаёт HTTP-атрибуты: `ContentType`, `CacheControl`, `ContentDisposition` — без `ContentType` браузер скачает файл вместо показа. |
 | `DeleteOneAsync(TKey, CancellationToken)` | Удалить объект. `false` если не существовал. |
+| `ListAsync(keyPrefix?, CancellationToken)` | Листинг объектов (`IAsyncEnumerable<ObjectListItem>`): сырой ключ, размер, ETag, дата. Типизированный бакет видит только объекты своего префикса маппинга; метаданные в листинг не входят (у S3 это отдельный запрос на объект), типизированный ключ из строки не восстанавливается. Наследуется от `IObjectBucket` — доступен и на сыром бакете. |
+| `GetPresignedReadUrlAsync(TKey, TimeSpan, CancellationToken)` | Временная публичная ссылка на скачивание. |
+| `GetPresignedWriteUrlAsync(TKey, TimeSpan, contentType?, CancellationToken)` | Временная ссылка на заливку HTTP PUT. Если задан `contentType`, клиент обязан прислать тот же заголовок. Объект, залитый по такой ссылке, не несёт метаданных — свойства читаются дефолтными. |
+
+```csharp
+// веб-сценарий: фото отдаётся браузеру напрямую из хранилища
+await storage.Photos.UploadAsync(id, meta, stream,
+    new UploadOptions { ContentType = "image/jpeg", CacheControl = "public, max-age=31536000" });
+
+var url = await storage.Photos.GetPresignedReadUrlAsync(id, TimeSpan.FromMinutes(15));
+
+// перечисление объектов бакета (в рамках префикса маппинга)
+await foreach (var item in storage.Photos.ListAsync())
+    Console.WriteLine($"{item.Key} {item.Size}");
+```
+
+#### Загрузка: большие файлы и пустые объекты
+
+- Пустой объект легален (маркеры, плейсхолдеры) — загружается обычным `PutObject`.
+- Сикабельные потоки до 64 МБ идут одним `PutObject`; больше — multipart-аплоадом частями по 16 МБ (лимит одиночного `PutObject` в S3 — 5 ГБ, multipart — 5 ТБ).
+- Несикабельный поток (сеть, pipe) больше не буферизуется целиком: он читается частями, память ограничена размером одной части; короткие потоки сворачиваются в обычный `PutObject`.
+- При ошибке multipart-аплоад автоматически прерывается (`AbortMultipartUpload`), чтобы незавершённые части не копились в хранилище.
 
 ### `IObjectStorageContext`
 
@@ -448,7 +495,7 @@ Generic-перегрузки фасада с типизированным клю
 
 ## Работа с JSON
 
-Extension-методы `ReadJsonAsync` / `UploadJsonAsync` работают с любым `IObjectMetadata` — никаких дополнительных интерфейсов реализовывать не нужно.
+Extension-методы `ReadJsonAsync` / `UploadJsonAsync` работают с любым `IObjectMetadata` — никаких дополнительных интерфейсов реализовывать не нужно. `UploadJsonAsync` через бакет автоматически выставляет `Content-Type: application/json`; фасад `IObjectStorageContext` канала опций не имеет и сохраняет прежнее поведение.
 
 ```csharp
 public class ReportContent

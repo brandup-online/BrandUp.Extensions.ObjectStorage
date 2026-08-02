@@ -6,6 +6,9 @@ namespace BrandUp.Extensions.ObjectStorage.Internals;
 /// </summary>
 internal static class DestinationValidator
 {
+    /// <summary>Joins a mapping prefix with an object identifier; shared by the S3 and fake implementations.</summary>
+    public const char ObjectKeyPrefixDelimiter = '/';
+
     /// <summary>Validates a bucket name: letters, digits, '-' and '.', starting and ending with a letter or digit.</summary>
     public static string NormalizeBucketName(string bucketName, string paramName)
     {

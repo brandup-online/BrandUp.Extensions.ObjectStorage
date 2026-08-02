@@ -29,7 +29,7 @@ public sealed class MinioFixture : IAsyncLifetime
     public MinioStorageContext Context => _provider?.GetRequiredService<MinioStorageContext>()
         ?? throw new InvalidOperationException("MinIO is not configured.");
 
-    public async Task InitializeAsync()
+    public async ValueTask InitializeAsync()
     {
         if (!MinioEnvironment.IsConfigured)
             return;
@@ -42,7 +42,10 @@ public sealed class MinioFixture : IAsyncLifetime
             o.AccessKeyId = MinioEnvironment.AccessKey;
             o.SecretAccessKey = MinioEnvironment.SecretKey;
             o.ForcePathStyle = true; // MinIO does not support virtual-hosted-style addressing
-        }).AddMapping<TestFileMetadata>(BucketName);
+        }).AddMapping<TestFileMetadata>(BucketName)
+          // Same destination on purpose: reading objects written as TestFileMetadata through the extended
+          // type exercises the schema-evolution path (see MinioStorageTests).
+          .AddMapping<ExtendedTestFileMetadata>(BucketName);
 
         services.AddObjectStorage<MinioStorageContext>(o =>
         {
@@ -63,7 +66,7 @@ public sealed class MinioFixture : IAsyncLifetime
         await Context.EnsureBucketsAsync();
     }
 
-    public async Task DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
         if (_provider is null)
             return;
@@ -86,6 +89,18 @@ public class TestFileMetadata : IObjectMetadata
 {
     public string? FileName { get; set; }
     public string? ContentType { get; set; }
+}
+
+/// <summary>
+/// <see cref="TestFileMetadata"/> after schema evolution: extra properties (including value types) that
+/// objects written earlier do not carry.
+/// </summary>
+public class ExtendedTestFileMetadata : IObjectMetadata
+{
+    public string? FileName { get; set; }
+    public string? ContentType { get; set; }
+    public int Version { get; set; }
+    public DateTime ArchivedAt { get; set; }
 }
 
 /// <summary>Metadata of the context-based integration tests; separate type so both mappings coexist.</summary>

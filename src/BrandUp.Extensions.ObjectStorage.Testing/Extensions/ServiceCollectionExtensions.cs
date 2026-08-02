@@ -102,12 +102,13 @@ public static class FakeObjectStorageServiceCollectionExtensions
         return owners;
     }
 
-    // Bucket pre-creation shared by both fake builders.
+    // Bucket pre-creation shared by both fake builders. The name is taken verbatim (S3 bucket names
+    // are lowercase-only, and the mapping layer already lowercases the names it derives).
     internal static void CreateBucket(FakeObjectStore store, string bucketName, Action<BucketSettings>? configure)
     {
         var settings = new BucketSettings();
         configure?.Invoke(settings);
-        store.CreateBucket(bucketName.ToLower(), settings);
+        store.CreateBucket(bucketName, settings);
     }
 }
 

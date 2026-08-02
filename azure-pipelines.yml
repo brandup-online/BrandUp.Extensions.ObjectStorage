@@ -25,7 +25,7 @@ variables:
   - name: version-major
     value: "2"
   - name: version-minor
-    value: "0"
+    value: "1"
 
 name: $(version-major).$(version-minor).$(rev:r)
 

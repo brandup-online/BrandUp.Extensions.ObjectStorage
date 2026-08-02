@@ -9,6 +9,12 @@ internal class S3ObjectBucket(string name, IS3Client client) : IObjectBucket
     public Task<bool> ExistsAsync(CancellationToken cancellationToken = default)
         => Client.BucketExistsAsync(Name, cancellationToken);
 
+    public IAsyncEnumerable<ObjectListItem> ListAsync(string? keyPrefix = null, CancellationToken cancellationToken = default)
+        => Client.ListObjectsAsync(Name, BuildListPrefix(keyPrefix), cancellationToken);
+
+    /// <summary>A typed bucket narrows the listing to its own mapping prefix.</summary>
+    private protected virtual string? BuildListPrefix(string? keyPrefix) => keyPrefix;
+
     public async Task<BucketSettings> GetSettingsAsync(CancellationToken cancellationToken = default)
     {
         var versioningTask = Client.GetVersioningAsync(Name, cancellationToken);
@@ -83,13 +89,16 @@ internal class S3ObjectBucket<TMetadata, TKey>(IS3Client client, ObjectMapping m
     public Task<Stream?> OpenReadAsync(TKey objectId, CancellationToken cancellationToken = default)
         => Client.ReadAsync(Name, GetObjectKey(objectId), cancellationToken);
 
-    public async Task<ObjectItem<TMetadata, TKey>> UploadAsync(TKey objectId, TMetadata metadata, Stream content, CancellationToken cancellationToken = default)
+    public Task<ObjectItem<TMetadata, TKey>> UploadAsync(TKey objectId, TMetadata metadata, Stream content, CancellationToken cancellationToken = default)
+        => UploadAsync(objectId, metadata, content, options: null, cancellationToken);
+
+    public async Task<ObjectItem<TMetadata, TKey>> UploadAsync(TKey objectId, TMetadata metadata, Stream content, UploadOptions? options, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(metadata);
         ArgumentNullException.ThrowIfNull(content);
 
         var serialized = mapping.Serialize(metadata);
-        var obj = await Client.UploadAsync(Name, GetObjectKey(objectId), serialized, content, cancellationToken);
+        var obj = await Client.UploadAsync(Name, GetObjectKey(objectId), serialized, content, options, cancellationToken);
 
         return CreateItem(objectId, obj, metadata);
     }
@@ -97,9 +106,18 @@ internal class S3ObjectBucket<TMetadata, TKey>(IS3Client client, ObjectMapping m
     public Task<bool> DeleteOneAsync(TKey objectId, CancellationToken cancellationToken = default)
         => Client.DeleteAsync(Name, GetObjectKey(objectId), cancellationToken);
 
+    public Task<Uri> GetPresignedReadUrlAsync(TKey objectId, TimeSpan expiresIn, CancellationToken cancellationToken = default)
+        => Client.GetPresignedUrlAsync(Name, GetObjectKey(objectId), expiresIn, forWrite: false, contentType: null, cancellationToken);
+
+    public Task<Uri> GetPresignedWriteUrlAsync(TKey objectId, TimeSpan expiresIn, string? contentType = null, CancellationToken cancellationToken = default)
+        => Client.GetPresignedUrlAsync(Name, GetObjectKey(objectId), expiresIn, forWrite: true, contentType, cancellationToken);
+
     /// <summary>The Guid subclass narrows the item to <see cref="ObjectItem{TMetadata}"/>.</summary>
     protected virtual ObjectItem<TMetadata, TKey> CreateItem(TKey id, S3StorageObject obj, TMetadata metadata)
         => new() { Id = id, Size = obj.Size, ETag = obj.Etag, Metadata = metadata };
+
+    private protected sealed override string? BuildListPrefix(string? keyPrefix)
+        => mapping.ObjectKeyPrefix is null ? keyPrefix : mapping.GetObjectKey(keyPrefix ?? string.Empty);
 
     string GetObjectKey(TKey objectId)
     {
@@ -121,4 +139,7 @@ internal sealed class S3ObjectBucket<TMetadata>(IS3Client client, ObjectMapping 
 
     public new async Task<ObjectItem<TMetadata>> UploadAsync(Guid objectId, TMetadata metadata, Stream content, CancellationToken cancellationToken = default)
         => (ObjectItem<TMetadata>)await base.UploadAsync(objectId, metadata, content, cancellationToken);
+
+    public new async Task<ObjectItem<TMetadata>> UploadAsync(Guid objectId, TMetadata metadata, Stream content, UploadOptions? options, CancellationToken cancellationToken = default)
+        => (ObjectItem<TMetadata>)await base.UploadAsync(objectId, metadata, content, options, cancellationToken);
 }

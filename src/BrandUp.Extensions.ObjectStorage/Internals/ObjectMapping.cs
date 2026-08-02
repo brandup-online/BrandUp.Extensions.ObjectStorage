@@ -7,7 +7,7 @@ namespace BrandUp.Extensions.ObjectStorage.Internals;
 
 internal class ObjectMapping
 {
-    const string ObjectKeyDelimiter = "_";
+    static readonly string ObjectKeyDelimiter = DestinationValidator.ObjectKeyPrefixDelimiter.ToString();
     static readonly string[] DateTimeFormats = ["yyyy-MM-dd", "o"];
 
     Type _objectType = null!;
@@ -54,11 +54,10 @@ internal class ObjectMapping
             if (!_properties.TryGetValue(key, out var accessor))
                 throw new InvalidOperationException($"Type {_objectType.FullName} does not contain property '{key}'.");
 
+            // Defense in depth: S3Client.FindAsync omits absent keys, so null should not occur — but a null
+            // reaching the compiled setter would NRE on value-type properties, so skip it (leave the default).
             if (value is null)
-            {
-                accessor.Set(obj, null);
                 continue;
-            }
 
             var valueType = accessor.PropertyType;
             if (valueType.IsGenericType && valueType.GetGenericTypeDefinition() == typeof(Nullable<>))
@@ -74,8 +73,10 @@ internal class ObjectMapping
         ArgumentNullException.ThrowIfNull(objectType);
         ArgumentException.ThrowIfNullOrEmpty(destination);
 
-        destination = destination.ToLower().Trim();
-        var (bucketName, objectKeyPrefix) = DestinationValidator.Split(destination);
+        // Only the bucket name is lowered (S3 requires lowercase names; invariant — the Turkish locale
+        // breaks culture-sensitive lowering). The key prefix keeps its case: S3 object keys are case-sensitive.
+        var (bucketName, objectKeyPrefix) = DestinationValidator.Split(destination.Trim());
+        bucketName = bucketName.ToLowerInvariant();
 
         var constructor = objectType.GetConstructor(BindingFlags.Instance | BindingFlags.Public, [])
             ?? throw new ArgumentException($"Type {objectType.FullName} has no public parameterless constructor.", nameof(objectType));
