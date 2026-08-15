@@ -80,12 +80,13 @@ public class S3ClientEncodingTests
     [Fact]
     public void ComputePartSize_ScalesToFitTenThousandParts()
     {
-        // Small payloads keep the default part; a 5 TB payload needs ~550 MB parts to fit 10 000.
-        Assert.Equal(S3Client.MultipartPartSize, S3Client.ComputePartSize(100L * 1024 * 1024));
+        var defaultPartSize = new ObjectStorageOptions().MultipartPartSize;
 
-        var fiveTb = 5L * 1024 * 1024 * 1024 * 1024;
-        var part = S3Client.ComputePartSize(fiveTb);
-        Assert.True((long)part * S3Client.MaxParts >= fiveTb);
+        // Small payloads keep the default part; a 5 TB payload needs ~550 MB parts to fit 10 000.
+        Assert.Equal(defaultPartSize, S3Client.ComputePartSize(100L * 1024 * 1024, defaultPartSize));
+
+        var part = S3Client.ComputePartSize(S3Client.MaxObjectSize, defaultPartSize);
+        Assert.True((long)part * S3Client.MaxParts >= S3Client.MaxObjectSize);
         Assert.True(part < 600 * 1024 * 1024);
     }
 }

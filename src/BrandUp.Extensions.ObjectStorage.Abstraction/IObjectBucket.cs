@@ -9,10 +9,12 @@ public interface IObjectBucket
     Task UpdateSettingsAsync(Action<BucketSettings> configure, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Lists objects of the bucket, optionally narrowed by a raw key prefix. A typed bucket
+    /// Lists objects of the bucket, optionally narrowed by a key prefix. A typed bucket
     /// (<see cref="IObjectBucket{TMetadata, TKey}"/>) whose mapping declares a key prefix scopes the
-    /// listing to that prefix; without one it sees the entire bucket, including objects of other
-    /// mappings. Returned keys are the raw object keys.
+    /// listing to that prefix, and <paramref name="keyPrefix"/> is then interpreted relative to the
+    /// mapping prefix — do not pass a raw key from a previous listing back as the prefix. Without a
+    /// mapping prefix the bucket sees the entire key space, including objects of other mappings.
+    /// Returned keys are always the raw object keys.
     /// </summary>
     IAsyncEnumerable<ObjectListItem> ListAsync(string? keyPrefix = null, CancellationToken cancellationToken = default);
 }
@@ -28,9 +30,12 @@ public interface IObjectBucket<TMetadata, TKey> : IObjectBucket
 {
     Task<ObjectItem<TMetadata, TKey>?> FindOneAsync(TKey objectId, CancellationToken cancellationToken = default);
     Task<Stream?> OpenReadAsync(TKey objectId, CancellationToken cancellationToken = default);
-    Task<ObjectItem<TMetadata, TKey>> UploadAsync(TKey objectId, TMetadata metadata, Stream content, CancellationToken cancellationToken = default);
     Task<ObjectItem<TMetadata, TKey>> UploadAsync(TKey objectId, TMetadata metadata, Stream content, UploadOptions? options, CancellationToken cancellationToken = default);
     Task<bool> DeleteOneAsync(TKey objectId, CancellationToken cancellationToken = default);
+
+    // Default implementation, so implementers define exactly one upload method.
+    Task<ObjectItem<TMetadata, TKey>> UploadAsync(TKey objectId, TMetadata metadata, Stream content, CancellationToken cancellationToken = default)
+        => UploadAsync(objectId, metadata, content, options: null, cancellationToken);
 
     /// <summary>Temporary public link for downloading the object, valid for <paramref name="expiresIn"/>.</summary>
     Task<Uri> GetPresignedReadUrlAsync(TKey objectId, TimeSpan expiresIn, CancellationToken cancellationToken = default);
@@ -51,6 +56,9 @@ public interface IObjectBucket<TMetadata> : IObjectBucket<TMetadata, Guid>
     where TMetadata : class, IObjectMetadata
 {
     new Task<ObjectItem<TMetadata>?> FindOneAsync(Guid objectId, CancellationToken cancellationToken = default);
-    new Task<ObjectItem<TMetadata>> UploadAsync(Guid objectId, TMetadata metadata, Stream content, CancellationToken cancellationToken = default);
     new Task<ObjectItem<TMetadata>> UploadAsync(Guid objectId, TMetadata metadata, Stream content, UploadOptions? options, CancellationToken cancellationToken = default);
+
+    // Default implementation, so implementers define exactly one upload method.
+    new Task<ObjectItem<TMetadata>> UploadAsync(Guid objectId, TMetadata metadata, Stream content, CancellationToken cancellationToken = default)
+        => UploadAsync(objectId, metadata, content, options: null, cancellationToken);
 }

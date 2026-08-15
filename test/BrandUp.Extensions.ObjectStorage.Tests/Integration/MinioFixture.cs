@@ -35,25 +35,15 @@ public sealed class MinioFixture : IAsyncLifetime
             return;
 
         var services = new ServiceCollection();
-        services.AddObjectStorage(o =>
-        {
-            o.ServiceUrl = MinioEnvironment.ServiceUrl;
-            o.AuthenticationRegion = MinioEnvironment.Region;
-            o.AccessKeyId = MinioEnvironment.AccessKey;
-            o.SecretAccessKey = MinioEnvironment.SecretKey;
-            o.ForcePathStyle = true; // MinIO does not support virtual-hosted-style addressing
-        }).AddMapping<TestFileMetadata>(BucketName)
+        services.AddObjectStorage(MinioEnvironment.Apply)
+          .AddMapping<TestFileMetadata>(BucketName)
           // Same destination on purpose: reading objects written as TestFileMetadata through the extended
           // type exercises the schema-evolution path (see MinioStorageTests).
           .AddMapping<ExtendedTestFileMetadata>(BucketName);
 
         services.AddObjectStorage<MinioStorageContext>(o =>
         {
-            o.ServiceUrl = MinioEnvironment.ServiceUrl;
-            o.AuthenticationRegion = MinioEnvironment.Region;
-            o.AccessKeyId = MinioEnvironment.AccessKey;
-            o.SecretAccessKey = MinioEnvironment.SecretKey;
-            o.ForcePathStyle = true;
+            MinioEnvironment.Apply(o);
             // Bucket name is known only at run time; the object key prefix comes from configuration as well.
             o.Objects["Files"] = $"{BucketName}/ctx";
         })

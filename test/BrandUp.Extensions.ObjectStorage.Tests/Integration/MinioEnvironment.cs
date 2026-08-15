@@ -14,4 +14,14 @@ static class MinioEnvironment
     public static string Region => Environment.GetEnvironmentVariable("MINIO_REGION") ?? "us-east-1";
 
     public static bool IsConfigured => !string.IsNullOrEmpty(ServiceUrl);
+
+    /// <summary>The single place the MinIO connection settings are applied, shared by fixture and tests.</summary>
+    public static void Apply(ObjectStorageOptions options)
+    {
+        options.ServiceUrl = ServiceUrl;
+        options.AuthenticationRegion = Region;
+        options.AccessKeyId = AccessKey;
+        options.SecretAccessKey = SecretKey;
+        options.ForcePathStyle = true; // MinIO does not support virtual-hosted-style addressing
+    }
 }

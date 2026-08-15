@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Net;
 using System.Text.RegularExpressions;
 using Amazon.Runtime;
@@ -12,12 +13,17 @@ internal class S3Client : IS3Client, IDisposable
     static readonly Regex TrainCaseRegex = new("(?<!^)([A-Z][a-z]|(?<=[a-z])[A-Z0-9])", RegexOptions.Compiled | RegexOptions.Singleline);
 
     readonly AmazonS3Client _s3;
+    readonly int _multipartPartSize;
+    readonly long _multipartThreshold;
 
     // Created per connection by S3ClientFactory; credentialsProvider is the one registered for that connection
     // (null for static or session-token credentials).
     public S3Client(ObjectStorageOptions opts, IObjectStorageCredentialsProvider? credentialsProvider = null)
     {
         ArgumentNullException.ThrowIfNull(opts);
+
+        _multipartPartSize = opts.MultipartPartSize;
+        _multipartThreshold = opts.MultipartThreshold;
 
         // Built once: a RefreshingAWSCredentials renews temp creds in place, so the singleton client is never recreated.
         _s3 = new AmazonS3Client(CreateCredentials(opts, credentialsProvider), new AmazonS3Config
@@ -57,15 +63,22 @@ internal class S3Client : IS3Client, IDisposable
 
     #region Object operations
 
-    // Mutable so integration tests can shrink them; S3 requires parts of at least 5 MB (except the last).
-    internal static int MultipartPartSize = 16 * 1024 * 1024;
-    internal static long MultipartThreshold = 64L * 1024 * 1024;
-
     // S3 rejects PartNumber > 10000, so the part size scales up for very large seekable payloads.
     internal const int MaxParts = 10_000;
 
-    internal static int ComputePartSize(long contentLength)
-        => (int)Math.Max(MultipartPartSize, (contentLength + MaxParts - 1) / MaxParts);
+    /// <summary>S3 caps a single object at 5 TB.</summary>
+    internal const long MaxObjectSize = 5L * 1024 * 1024 * 1024 * 1024;
+
+    /// <summary>S3 caps a single PUT (and a single multipart part) at 5 GB.</summary>
+    internal const long MaxSinglePutSize = 5L * 1024 * 1024 * 1024;
+
+    // A non-seekable stream has an unknown length, so the part size doubles every GrowPartEvery parts
+    // (see Parts) up to the cap — long streams fit the 10,000-part limit with bounded memory.
+    internal const int GrowPartEvery = 1_000;
+    internal const int MaxGrownPartSize = 512 * 1024 * 1024;
+
+    internal static int ComputePartSize(long contentLength, int minPartSize)
+        => (int)Math.Max(minPartSize, (contentLength + MaxParts - 1) / MaxParts);
 
     public async Task<S3StorageObject> UploadAsync(string bucketName, string objectKey, IDictionary<string, string> metadata, Stream stream, UploadOptions? options, CancellationToken cancellationToken)
     {
@@ -76,28 +89,56 @@ internal class S3Client : IS3Client, IDisposable
 
         if (stream.CanSeek)
         {
-            // Empty objects are legal in S3 (markers, placeholders) and go through the simple path.
+            UploadStreamGuard.ThrowIfConsumed(stream);
+
             var contentLength = stream.Length - stream.Position;
-            if (contentLength <= MultipartThreshold)
+            if (contentLength > MaxObjectSize)
+                throw new ArgumentException(
+                    $"Content length {contentLength} exceeds the S3 object size limit of {MaxObjectSize} bytes (5 TB).", nameof(stream));
+
+            // Empty objects are legal in S3 (markers, placeholders) and go through the simple path.
+            if (contentLength <= _multipartThreshold)
                 return await PutObjectAsync(bucketName, objectKey, metadata, stream, contentLength, options, cancellationToken);
 
-            return await MultipartUploadAsync(bucketName, objectKey, metadata, options,
-                Parts(new byte[ComputePartSize(contentLength)], firstRead: 0, stream, cancellationToken), cancellationToken);
+            // A scaled-up part (payload > MaxParts * configured part size) is a rare, huge buffer: renting
+            // it would round up to the next power-of-two pool bucket (~2x waste) and park it in the shared
+            // pool for the process lifetime, so such buffers are allocated directly instead.
+            var partSize = ComputePartSize(contentLength, _multipartPartSize);
+            var pooled = partSize == _multipartPartSize;
+            var buffer = pooled ? ArrayPool<byte>.Shared.Rent(partSize) : GC.AllocateUninitializedArray<byte>(partSize);
+            try
+            {
+                return await MultipartUploadAsync(bucketName, objectKey, metadata, options,
+                    Parts(buffer, partSize, firstRead: 0, stream, growable: false, cancellationToken), cancellationToken);
+            }
+            finally
+            {
+                if (pooled)
+                    ArrayPool<byte>.Shared.Return(buffer);
+            }
         }
 
         // Non-seekable: read the first part; a stream shorter than one part takes the simple path, so memory
         // is bounded by the part size instead of the whole payload.
-        var buffer = new byte[MultipartPartSize];
-        var read = await ReadUpToAsync(stream, buffer, cancellationToken);
-
-        if (read < buffer.Length)
+        var firstBuffer = ArrayPool<byte>.Shared.Rent(_multipartPartSize);
+        try
         {
-            using var single = new MemoryStream(buffer, 0, read, writable: false);
-            return await PutObjectAsync(bucketName, objectKey, metadata, single, read, options, cancellationToken);
-        }
+            var read = await stream.ReadAtLeastAsync(
+                firstBuffer.AsMemory(0, _multipartPartSize), _multipartPartSize, throwOnEndOfStream: false, cancellationToken);
 
-        return await MultipartUploadAsync(bucketName, objectKey, metadata, options,
-            Parts(buffer, read, stream, cancellationToken), cancellationToken);
+            if (read < _multipartPartSize)
+            {
+                using var single = new MemoryStream(firstBuffer, 0, read, writable: false);
+                return await PutObjectAsync(bucketName, objectKey, metadata, single, read, options, cancellationToken);
+            }
+
+            return await MultipartUploadAsync(bucketName, objectKey, metadata, options,
+                Parts(firstBuffer, _multipartPartSize, read, stream, growable: true, cancellationToken), cancellationToken);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(firstBuffer);
+        }
     }
 
     async Task<S3StorageObject> PutObjectAsync(string bucketName, string objectKey, IDictionary<string, string> metadata, Stream stream, long contentLength, UploadOptions? options, CancellationToken cancellationToken)
@@ -122,30 +163,55 @@ internal class S3Client : IS3Client, IDisposable
         }
         catch (AmazonS3Exception ex)
         {
-            throw new ObjectStorageException(ex.Message, ex.StatusCode, ex);
+            throw Wrap(ex);
         }
     }
 
     /// <summary>
-    /// Splits any stream into parts over one shared buffer. Parts are consumed strictly sequentially
-    /// (each UploadPart completes before the next part is read), so a single buffer serves the whole
-    /// upload — no per-part LOH allocations. Do not parallelize part uploads without revisiting this.
+    /// Splits any stream into parts over one shared (pooled) buffer. Parts are consumed strictly
+    /// sequentially (each UploadPart completes before the next part is read), so a single buffer serves
+    /// the whole upload — no per-part allocations. Do not parallelize part uploads without revisiting this.
     /// Buffering also keeps the SDK away from the caller's stream: UploadPart offers no AutoCloseStream
     /// and no exact-read guarantee, so feeding it the source directly is not safe.
+    /// When <paramref name="growable"/> (non-seekable source of unknown length), the part size doubles
+    /// every <see cref="GrowPartEvery"/> parts up to <see cref="MaxGrownPartSize"/>, so long streams fit
+    /// the 10,000-part S3 limit with bounded memory. The initial buffer is owned (rented and returned) by
+    /// the caller; grown buffers are rented and returned here.
     /// </summary>
     static async IAsyncEnumerable<MemoryStream> Parts(
-        byte[] buffer, int firstRead, Stream stream, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+        byte[] buffer, int partSize, int firstRead, Stream stream, bool growable,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        if (firstRead > 0)
-            yield return new MemoryStream(buffer, 0, firstRead, writable: false);
-
-        while (true)
+        var initialBuffer = buffer;
+        try
         {
-            var read = await ReadUpToAsync(stream, buffer, cancellationToken);
-            if (read == 0)
-                yield break;
+            if (firstRead > 0)
+                yield return new MemoryStream(buffer, 0, firstRead, writable: false);
 
-            yield return new MemoryStream(buffer, 0, read, writable: false);
+            var partsProduced = firstRead > 0 ? 1 : 0;
+            while (true)
+            {
+                if (growable && partsProduced > 0 && partsProduced % GrowPartEvery == 0 && partSize < MaxGrownPartSize)
+                {
+                    partSize = (int)Math.Min(2L * partSize, MaxGrownPartSize);
+                    if (!ReferenceEquals(buffer, initialBuffer))
+                        ArrayPool<byte>.Shared.Return(buffer);
+                    buffer = ArrayPool<byte>.Shared.Rent(partSize);
+                }
+
+                var read = await stream.ReadAtLeastAsync(
+                    buffer.AsMemory(0, partSize), partSize, throwOnEndOfStream: false, cancellationToken);
+                if (read == 0)
+                    yield break;
+
+                yield return new MemoryStream(buffer, 0, read, writable: false);
+                partsProduced++;
+            }
+        }
+        finally
+        {
+            if (!ReferenceEquals(buffer, initialBuffer))
+                ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 
@@ -170,9 +236,8 @@ internal class S3Client : IS3Client, IDisposable
             {
                 if (partNumber > MaxParts)
                     throw new InvalidOperationException(
-                        $"Object exceeds the S3 limit of {MaxParts} multipart parts. With a non-seekable " +
-                        $"stream the part size is fixed at {MultipartPartSize} bytes; supply a seekable " +
-                        "stream so the part size can scale with the payload.");
+                        $"Object exceeds the S3 limit of {MaxParts} multipart parts. " +
+                        "Supply a seekable stream so the part size can be computed from the payload length up front.");
 
                 using (content)
                 {
@@ -206,7 +271,7 @@ internal class S3Client : IS3Client, IDisposable
         catch (AmazonS3Exception ex)
         {
             await AbortSafeAsync();
-            throw new ObjectStorageException(ex.Message, ex.StatusCode, ex);
+            throw Wrap(ex);
         }
         catch
         {
@@ -234,20 +299,6 @@ internal class S3Client : IS3Client, IDisposable
                 // the original failure matters more
             }
         }
-    }
-
-    static async Task<int> ReadUpToAsync(Stream stream, byte[] buffer, CancellationToken cancellationToken)
-    {
-        var total = 0;
-        while (total < buffer.Length)
-        {
-            var read = await stream.ReadAsync(buffer.AsMemory(total), cancellationToken);
-            if (read == 0)
-                break;
-            total += read;
-        }
-
-        return total;
     }
 
     static void ApplyMetadata(MetadataCollection target, IDictionary<string, string> metadata)
@@ -289,7 +340,7 @@ internal class S3Client : IS3Client, IDisposable
             }
             catch (AmazonS3Exception ex)
             {
-                throw new ObjectStorageException(ex.Message, ex.StatusCode, ex.ErrorCode, ex);
+                throw Wrap(ex);
             }
 
             foreach (var entry in response.S3Objects ?? [])
@@ -310,8 +361,7 @@ internal class S3Client : IS3Client, IDisposable
     {
         ArgumentException.ThrowIfNullOrEmpty(bucketName);
         ArgumentException.ThrowIfNullOrEmpty(objectKey);
-        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(expiresIn, TimeSpan.Zero);
-        ArgumentOutOfRangeException.ThrowIfGreaterThan(expiresIn, PresignedUrlLimits.MaxLifetime);
+        PresignedUrlLimits.Validate(expiresIn, nameof(expiresIn));
 
         var request = new GetPreSignedUrlRequest
         {
@@ -335,7 +385,7 @@ internal class S3Client : IS3Client, IDisposable
         }
         catch (AmazonS3Exception ex)
         {
-            throw new ObjectStorageException(ex.Message, ex.StatusCode, ex.ErrorCode, ex);
+            throw Wrap(ex);
         }
     }
 
@@ -370,7 +420,7 @@ internal class S3Client : IS3Client, IDisposable
             return ex.StatusCode switch
             {
                 HttpStatusCode.NotFound => null,
-                _ => throw new ObjectStorageException(ex.Message, ex.StatusCode, ex)
+                _ => throw Wrap(ex)
             };
         }
     }
@@ -395,7 +445,7 @@ internal class S3Client : IS3Client, IDisposable
             return ex.StatusCode switch
             {
                 HttpStatusCode.NotFound => null,
-                _ => throw new ObjectStorageException(ex.Message, ex.StatusCode, ex)
+                _ => throw Wrap(ex)
             };
         }
     }
@@ -420,7 +470,7 @@ internal class S3Client : IS3Client, IDisposable
             return ex.StatusCode switch
             {
                 HttpStatusCode.NotFound => false,
-                _ => throw new ObjectStorageException(ex.Message, ex.StatusCode, ex)
+                _ => throw Wrap(ex)
             };
         }
     }
@@ -442,7 +492,7 @@ internal class S3Client : IS3Client, IDisposable
         }
         catch (AmazonS3Exception ex)
         {
-            throw new ObjectStorageException(ex.Message, ex.StatusCode, ex);
+            throw Wrap(ex);
         }
     }
 
@@ -459,7 +509,7 @@ internal class S3Client : IS3Client, IDisposable
         catch (AmazonS3Exception ex)
         {
             // Error code is carried over so callers can tell "already exists" from other conflicts.
-            throw new ObjectStorageException(ex.Message, ex.StatusCode, ex.ErrorCode, ex);
+            throw Wrap(ex);
         }
     }
 
@@ -471,7 +521,7 @@ internal class S3Client : IS3Client, IDisposable
         }
         catch (AmazonS3Exception ex)
         {
-            throw new ObjectStorageException(ex.Message, ex.StatusCode, ex);
+            throw Wrap(ex);
         }
     }
 
@@ -486,7 +536,7 @@ internal class S3Client : IS3Client, IDisposable
         }
         catch (AmazonS3Exception ex)
         {
-            throw new ObjectStorageException(ex.Message, ex.StatusCode, ex);
+            throw Wrap(ex);
         }
     }
 
@@ -510,7 +560,7 @@ internal class S3Client : IS3Client, IDisposable
         }
         catch (AmazonS3Exception ex)
         {
-            throw new ObjectStorageException(ex.Message, ex.StatusCode, ex);
+            throw Wrap(ex);
         }
     }
 
@@ -534,7 +584,7 @@ internal class S3Client : IS3Client, IDisposable
         }
         catch (AmazonS3Exception ex)
         {
-            throw new ObjectStorageException(ex.Message, ex.StatusCode, ex);
+            throw Wrap(ex);
         }
     }
 
@@ -551,7 +601,7 @@ internal class S3Client : IS3Client, IDisposable
         }
         catch (AmazonS3Exception ex)
         {
-            throw new ObjectStorageException(ex.Message, ex.StatusCode, ex);
+            throw Wrap(ex);
         }
     }
 
@@ -575,7 +625,7 @@ internal class S3Client : IS3Client, IDisposable
         }
         catch (AmazonS3Exception ex)
         {
-            throw new ObjectStorageException(ex.Message, ex.StatusCode, ex);
+            throw Wrap(ex);
         }
     }
 
@@ -598,7 +648,7 @@ internal class S3Client : IS3Client, IDisposable
         }
         catch (AmazonS3Exception ex)
         {
-            throw new ObjectStorageException(ex.Message, ex.StatusCode, ex);
+            throw Wrap(ex);
         }
     }
 
@@ -628,13 +678,18 @@ internal class S3Client : IS3Client, IDisposable
         }
         catch (AmazonS3Exception ex)
         {
-            throw new ObjectStorageException(ex.Message, ex.StatusCode, ex);
+            throw Wrap(ex);
         }
     }
 
     #endregion
 
     #region Helpers
+
+    // ErrorCode is always carried over so callers can branch on it ("NoSuchBucket", "InvalidBucketName", ...)
+    // against production exactly like against the Testing fake.
+    static ObjectStorageException Wrap(AmazonS3Exception ex)
+        => new(ex.Message, ex.StatusCode, ex.ErrorCode, ex);
 
     static LifecycleRule ToLifecycleRule(S3LifecycleRule r)
     {
@@ -662,13 +717,10 @@ internal class S3Client : IS3Client, IDisposable
             : null
     };
 
-    static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> EncodedKeyCache = new();
-
     internal static string EncodeMetadataKey(string key)
     {
         ArgumentException.ThrowIfNullOrEmpty(key);
-        return EncodedKeyCache.GetOrAdd(key,
-            static k => TrainCaseRegex.Replace(k, "-$1").Replace('_', '-').Replace("--", "-").Trim().ToLowerInvariant());
+        return TrainCaseRegex.Replace(key, "-$1").Replace('_', '-').Replace("--", "-").Trim().ToLowerInvariant();
     }
 
     internal static string EncodeMetadataValue(string value)

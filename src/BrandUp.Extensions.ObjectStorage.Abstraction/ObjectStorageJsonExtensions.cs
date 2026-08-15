@@ -112,9 +112,8 @@ public static class ObjectStorageJsonExtensions
     #endregion
 
     // JSON uploads through a bucket are served back as JSON; the IObjectStorageContext facade has no
-    // options channel and keeps the historic behavior. A fresh instance per call: the fake stores the
-    // reference, and a shared mutable instance could be corrupted through it.
-    static UploadOptions JsonUploadOptions => new() { ContentType = "application/json" };
+    // options channel and keeps the historic behavior.
+    static readonly UploadOptions JsonUploadOptions = new() { ContentType = "application/json" };
 
     static async Task<TContent?> DeserializeAsync<TContent>(
         Stream? stream, JsonSerializerOptions? options, CancellationToken cancellationToken)
