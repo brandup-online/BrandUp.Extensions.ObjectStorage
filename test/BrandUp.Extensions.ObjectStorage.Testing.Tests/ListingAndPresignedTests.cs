@@ -29,8 +29,8 @@ public class ListingAndPresignedTests
             await storage.Videos.UploadAsync(Guid.NewGuid(), new VideoMetadata(), new MemoryStream([2, 3]));
 
             // Both live in bucket "media" under different mapping prefixes.
-            var photos = await ToListAsync(storage.Photos.ListAsync());
-            var videos = await ToListAsync(storage.Videos.ListAsync());
+            var photos = await storage.Photos.ListAsync().ToListAsync();
+            var videos = await storage.Videos.ListAsync().ToListAsync();
 
             var photo = Assert.Single(photos);
             Assert.Equal($"photos/{photoId:d}", photo.Key);
@@ -41,7 +41,7 @@ public class ListingAndPresignedTests
             Assert.StartsWith("videos/", Assert.Single(videos).Key);
 
             // The raw (untyped) bucket lists everything, in lexicographic key order like S3.
-            var all = await ToListAsync(storage.Client.GetBucket("media").ListAsync());
+            var all = await storage.Client.GetBucket("media").ListAsync().ToListAsync();
             Assert.Equal(2, all.Count);
             Assert.Equal(all.Select(i => i.Key).OrderBy(k => k, StringComparer.Ordinal), all.Select(i => i.Key));
         }
@@ -124,14 +124,6 @@ public class ListingAndPresignedTests
             await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
                 () => storage.Photos.GetPresignedReadUrlAsync(id, TimeSpan.Zero));
         }
-    }
-
-    static async Task<List<ObjectListItem>> ToListAsync(IAsyncEnumerable<ObjectListItem> source)
-    {
-        var list = new List<ObjectListItem>();
-        await foreach (var item in source)
-            list.Add(item);
-        return list;
     }
 
     public class PhotoMetadata : IObjectMetadata { }

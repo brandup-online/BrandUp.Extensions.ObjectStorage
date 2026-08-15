@@ -102,8 +102,8 @@ public static class FakeObjectStorageServiceCollectionExtensions
         return owners;
     }
 
-    // Bucket pre-creation shared by both fake builders. The name is taken verbatim (S3 bucket names
-    // are lowercase-only, and the mapping layer already lowercases the names it derives).
+    // Bucket pre-creation shared by both fake builders. The store validates the name the way real S3
+    // does at creation, so a name the lowercasing mapping layer could never reach fails at setup.
     internal static void CreateBucket(FakeObjectStore store, string bucketName, Action<BucketSettings>? configure)
     {
         var settings = new BucketSettings();
@@ -153,7 +153,7 @@ public class FakeObjectStorageBuilder(IServiceCollection services, FakeObjectSto
     }
 
     /// <summary>
-    /// Предзаполняет бакет перед тестами.
+    /// Pre-creates a bucket before the tests run.
     /// </summary>
     public FakeObjectStorageBuilder WithBucket(string bucketName, Action<BucketSettings>? configure = null)
     {
@@ -239,7 +239,7 @@ public class FakeObjectStorageBuilder<TContext>(
     }
 
     /// <summary>
-    /// Предзаполняет бакет перед тестами.
+    /// Pre-creates a bucket before the tests run.
     /// </summary>
     public FakeObjectStorageBuilder<TContext> WithBucket(string bucketName, Action<BucketSettings>? configure = null)
     {

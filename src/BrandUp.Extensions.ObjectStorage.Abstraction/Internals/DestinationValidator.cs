@@ -9,6 +9,20 @@ internal static class DestinationValidator
     /// <summary>Joins a mapping prefix with an object identifier; shared by the S3 and fake implementations.</summary>
     public const char ObjectKeyPrefixDelimiter = '/';
 
+    /// <summary>
+    /// Composes the full object key from a mapping prefix and an already-serialized object identifier.
+    /// The single place that knows the key layout, so the S3 and fake implementations cannot drift.
+    /// </summary>
+    public static string JoinKey(string? prefix, string objectId)
+        => prefix is null ? objectId : $"{prefix}{ObjectKeyPrefixDelimiter}{objectId}";
+
+    /// <summary>
+    /// Composes the effective listing prefix from a mapping prefix and a caller-supplied key prefix
+    /// (relative to the mapping prefix). A <see langword="null"/> key prefix lists the whole mapping scope.
+    /// </summary>
+    public static string? JoinListPrefix(string? prefix, string? keyPrefix)
+        => prefix is null ? keyPrefix : $"{prefix}{ObjectKeyPrefixDelimiter}{keyPrefix}";
+
     /// <summary>Validates a bucket name: letters, digits, '-' and '.', starting and ending with a letter or digit.</summary>
     public static string NormalizeBucketName(string bucketName, string paramName)
     {

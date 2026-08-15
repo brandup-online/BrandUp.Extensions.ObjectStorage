@@ -1,5 +1,3 @@
-using System.ComponentModel;
-using System.Globalization;
 using System.Linq.Expressions;
 using System.Reflection;
 
@@ -7,9 +5,6 @@ namespace BrandUp.Extensions.ObjectStorage.Internals;
 
 internal class ObjectMapping
 {
-    static readonly string ObjectKeyDelimiter = DestinationValidator.ObjectKeyPrefixDelimiter.ToString();
-    static readonly string[] DateTimeFormats = ["yyyy-MM-dd", "o"];
-
     Type _objectType = null!;
     Func<IObjectMetadata> _factory = null!;
     Dictionary<string, PropertyAccessor> _properties = null!;
@@ -22,7 +17,7 @@ internal class ObjectMapping
 
     /// <param name="objectId">Already-serialized object identifier (see ObjectKeySerializer).</param>
     public string GetObjectKey(string objectId)
-        => ObjectKeyPrefix is null ? objectId : string.Join(ObjectKeyDelimiter, ObjectKeyPrefix, objectId);
+        => DestinationValidator.JoinKey(ObjectKeyPrefix, objectId);
 
     public IDictionary<string, string> Serialize(IObjectMetadata metadata)
     {
@@ -35,11 +30,7 @@ internal class ObjectMapping
             if (value is null)
                 continue;
 
-            var valueType = accessor.PropertyType;
-            if (valueType.IsGenericType && valueType.GetGenericTypeDefinition() == typeof(Nullable<>))
-                valueType = Nullable.GetUnderlyingType(valueType)!;
-
-            data[key] = valueType == typeof(string) ? (string)value : ConvertToString(value);
+            data[key] = MetadataValueConverter.ToInvariantString(value);
         }
         return data;
     }
@@ -59,11 +50,8 @@ internal class ObjectMapping
             if (value is null)
                 continue;
 
-            var valueType = accessor.PropertyType;
-            if (valueType.IsGenericType && valueType.GetGenericTypeDefinition() == typeof(Nullable<>))
-                valueType = Nullable.GetUnderlyingType(valueType)!;
-
-            accessor.Set(obj, ConvertFromString(value, valueType));
+            var valueType = Nullable.GetUnderlyingType(accessor.PropertyType) ?? accessor.PropertyType;
+            accessor.Set(obj, MetadataValueConverter.FromInvariantString(value, valueType));
         }
         return obj;
     }
@@ -112,32 +100,6 @@ internal class ObjectMapping
             setObjParam, setValParam).Compile();
 
         return new PropertyAccessor(property.PropertyType, getter, setter);
-    }
-
-    static string ConvertToString(object value)
-    {
-        if (value is DateTime date)
-        {
-            if (date.Kind == DateTimeKind.Local)
-                date = DateTime.SpecifyKind(date, DateTimeKind.Unspecified);
-            return date.TimeOfDay == TimeSpan.Zero
-                ? date.ToString("yyyy-MM-dd")
-                : date.ToString("o", CultureInfo.InvariantCulture);
-        }
-        var converter = TypeDescriptor.GetConverter(value.GetType());
-        return converter.ConvertToInvariantString(value) ?? string.Empty;
-    }
-
-    static object ConvertFromString(string str, Type targetType)
-    {
-        if (targetType == typeof(string))
-            return str;
-        if (targetType == typeof(DateTime))
-            return DateTime.ParseExact(str, DateTimeFormats, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
-
-        var converter = TypeDescriptor.GetConverter(targetType);
-        return converter.ConvertFromInvariantString(str)
-            ?? throw new InvalidOperationException($"Cannot convert '{str}' to {targetType.Name}.");
     }
 
     readonly record struct PropertyAccessor(

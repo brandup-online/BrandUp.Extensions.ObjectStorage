@@ -1,5 +1,5 @@
 using System.Text;
-using BrandUp.Extensions.ObjectStorage.Internals;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace BrandUp.Extensions.ObjectStorage.Integration;
 
@@ -166,46 +166,47 @@ public class MinioStorageTests(MinioFixture fixture) : IClassFixture<MinioFixtur
     [MinioFact]
     public async Task Object_Multipart_RoundTrip()
     {
-        // Shrink the thresholds (5 MB is the S3 minimum part size) so multipart triggers on a 12 MB payload
-        // for both the large-seekable and the long-non-seekable path.
-        var (partSize, threshold) = (S3Client.MultipartPartSize, S3Client.MultipartThreshold);
-        S3Client.MultipartPartSize = 5 * 1024 * 1024;
-        S3Client.MultipartThreshold = 8 * 1024 * 1024;
+        // A dedicated connection with shrunk thresholds (5 MB is the S3 minimum part size), so multipart
+        // triggers on a 12 MB payload for both the large-seekable and the long-non-seekable path without
+        // touching the shared fixture client.
+        var services = new ServiceCollection();
+        services.AddObjectStorage(o =>
+        {
+            MinioEnvironment.Apply(o);
+            o.MultipartPartSize = 5 * 1024 * 1024;
+            o.MultipartThreshold = 8 * 1024 * 1024;
+        }).AddMapping<TestFileMetadata>(fixture.BucketName);
+
+        await using var provider = services.BuildServiceProvider();
+        var bucket = provider.GetRequiredService<IObjectStorageClient>().GetBucket<TestFileMetadata>();
+
+        var payload = new byte[12 * 1024 * 1024];
+        Random.Shared.NextBytes(payload);
+
+        var seekableId = Guid.NewGuid();
+        var pipeId = Guid.NewGuid();
+
+        var uploaded = await bucket.UploadAsync(seekableId, new TestFileMetadata { FileName = "large.bin" },
+            new MemoryStream(payload));
+        await bucket.UploadAsync(pipeId, new TestFileMetadata { FileName = "large-pipe.bin" },
+            new NonSeekableStream(new MemoryStream(payload)));
         try
         {
-            var bucket = fixture.Client.GetBucket<TestFileMetadata>();
-            var payload = new byte[12 * 1024 * 1024];
-            Random.Shared.NextBytes(payload);
+            Assert.Equal(payload.Length, uploaded.Size);
 
-            var seekableId = Guid.NewGuid();
-            var pipeId = Guid.NewGuid();
+            // Metadata travels through InitiateMultipartUpload and must round-trip like the simple path.
+            var found = await bucket.FindOneAsync(seekableId);
+            Assert.NotNull(found);
+            Assert.Equal(payload.Length, found.Size);
+            Assert.Equal("large.bin", found.Metadata.FileName);
 
-            var uploaded = await bucket.UploadAsync(seekableId, new TestFileMetadata { FileName = "large.bin" },
-                new MemoryStream(payload));
-            await bucket.UploadAsync(pipeId, new TestFileMetadata { FileName = "large-pipe.bin" },
-                new NonSeekableStream(new MemoryStream(payload)));
-            try
-            {
-                Assert.Equal(payload.Length, uploaded.Size);
-
-                // Metadata travels through InitiateMultipartUpload and must round-trip like the simple path.
-                var found = await bucket.FindOneAsync(seekableId);
-                Assert.NotNull(found);
-                Assert.Equal(payload.Length, found.Size);
-                Assert.Equal("large.bin", found.Metadata.FileName);
-
-                Assert.Equal(payload, await ReadAllAsync(bucket, seekableId));
-                Assert.Equal(payload, await ReadAllAsync(bucket, pipeId));
-            }
-            finally
-            {
-                await bucket.DeleteOneAsync(seekableId);
-                await bucket.DeleteOneAsync(pipeId);
-            }
+            Assert.Equal(payload, await ReadAllAsync(bucket, seekableId));
+            Assert.Equal(payload, await ReadAllAsync(bucket, pipeId));
         }
         finally
         {
-            (S3Client.MultipartPartSize, S3Client.MultipartThreshold) = (partSize, threshold);
+            await bucket.DeleteOneAsync(seekableId);
+            await bucket.DeleteOneAsync(pipeId);
         }
     }
 
@@ -226,7 +227,7 @@ public class MinioStorageTests(MinioFixture fixture) : IClassFixture<MinioFixtur
         var payload = Encoding.UTF8.GetBytes("presigned payload");
         using var http = new HttpClient();
 
-        // Read: upload with a content type, download через presigned GET — тело и заголовок совпадают.
+        // Read: upload with a content type, download via presigned GET — body and header must match.
         await bucket.UploadAsync(id, new TestFileMetadata { FileName = "p.txt" }, new MemoryStream(payload),
             new UploadOptions { ContentType = "text/plain" });
         try
@@ -238,8 +239,8 @@ public class MinioStorageTests(MinioFixture fixture) : IClassFixture<MinioFixtur
             Assert.Equal(payload, await response.Content.ReadAsByteArrayAsync());
             Assert.Equal("text/plain", response.Content.Headers.ContentType?.MediaType);
 
-            // Write: клиент заливает по presigned PUT; объект читается библиотекой,
-            // метаданные отсутствуют — свойства приходят дефолтными (schema-tolerant чтение).
+            // Write: the client uploads via presigned PUT; the object is then read through the library,
+            // metadata is absent — properties come back as defaults (schema-tolerant read).
             var writeId = Guid.NewGuid();
             var writeUrl = await bucket.GetPresignedWriteUrlAsync(writeId, TimeSpan.FromMinutes(5), "text/plain");
 
@@ -275,17 +276,13 @@ public class MinioStorageTests(MinioFixture fixture) : IClassFixture<MinioFixtur
         try
         {
             // The prefixed bucket sees only its own objects.
-            var scopedItems = new List<ObjectListItem>();
-            await foreach (var item in scoped.ListAsync())
-                scopedItems.Add(item);
+            var scopedItems = await scoped.ListAsync().ToListAsync();
 
             Assert.Contains(scopedItems, i => i.Key == $"ctx/{scopedId:d}" && i.Size == 2);
             Assert.DoesNotContain(scopedItems, i => i.Key.Contains($"{fileId:d}"));
 
             // The raw bucket sees everything.
-            var all = new List<ObjectListItem>();
-            await foreach (var item in fixture.Client.GetBucket(fixture.BucketName).ListAsync())
-                all.Add(item);
+            var all = await fixture.Client.GetBucket(fixture.BucketName).ListAsync().ToListAsync();
 
             Assert.Contains(all, i => i.Key == $"{fileId:d}");
             Assert.Contains(all, i => i.Key == $"ctx/{scopedId:d}");

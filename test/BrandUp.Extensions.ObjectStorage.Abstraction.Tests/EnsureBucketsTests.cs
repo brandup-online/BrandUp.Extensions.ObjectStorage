@@ -215,9 +215,6 @@ public class EnsureBucketsTests
         public Task<Stream?> OpenReadAsync(Guid objectId, CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
 
-        public Task<ObjectItem<TMetadata>> UploadAsync(Guid objectId, TMetadata metadata, Stream content, CancellationToken cancellationToken = default)
-            => throw new NotSupportedException();
-
         public Task<bool> DeleteOneAsync(Guid objectId, CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
 
@@ -232,9 +229,6 @@ public class EnsureBucketsTests
 
         // Base (Guid-keyed) interface members, shadowed by the ObjectItem<TMetadata>-typed ones above.
         Task<ObjectItem<TMetadata, Guid>?> IObjectBucket<TMetadata, Guid>.FindOneAsync(Guid objectId, CancellationToken cancellationToken)
-            => throw new NotSupportedException();
-
-        Task<ObjectItem<TMetadata, Guid>> IObjectBucket<TMetadata, Guid>.UploadAsync(Guid objectId, TMetadata metadata, Stream content, CancellationToken cancellationToken)
             => throw new NotSupportedException();
 
         Task<ObjectItem<TMetadata, Guid>> IObjectBucket<TMetadata, Guid>.UploadAsync(Guid objectId, TMetadata metadata, Stream content, UploadOptions? options, CancellationToken cancellationToken)

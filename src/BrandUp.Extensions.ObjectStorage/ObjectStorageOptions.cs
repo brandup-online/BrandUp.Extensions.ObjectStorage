@@ -49,6 +49,19 @@ public class ObjectStorageOptions
     /// support virtual-hosted addressing. Defaults to <see langword="false"/>.
     /// </summary>
     public bool ForcePathStyle { get; set; }
+
+    /// <summary>
+    /// Size of a multipart upload part in bytes. S3 requires at least 5 MB per part (except the last);
+    /// for very large seekable payloads the effective part size scales up automatically to fit the
+    /// 10,000-part limit. Defaults to 16 MB.
+    /// </summary>
+    public int MultipartPartSize { get; set; } = 16 * 1024 * 1024;
+
+    /// <summary>
+    /// Seekable payloads larger than this many bytes upload via the multipart API; smaller ones use a
+    /// single PUT. Defaults to 64 MB.
+    /// </summary>
+    public long MultipartThreshold { get; set; } = 64L * 1024 * 1024;
 }
 
 // Both dependencies are injected via DI default-value binding. credentialsProvider is the legacy marker of the
@@ -67,6 +80,17 @@ internal class ObjectStorageOptionsValidator(
             return ValidateOptionsResult.Fail($"Property {nameof(ObjectStorageOptions.ServiceUrl)}{connection} is required.");
         if (string.IsNullOrEmpty(options.AuthenticationRegion))
             return ValidateOptionsResult.Fail($"Property {nameof(ObjectStorageOptions.AuthenticationRegion)}{connection} is required.");
+
+        // S3 rejects multipart parts below 5 MB (except the last), so a smaller setting would fail at upload time.
+        if (options.MultipartPartSize < 5 * 1024 * 1024)
+            return ValidateOptionsResult.Fail(
+                $"Property {nameof(ObjectStorageOptions.MultipartPartSize)}{connection} must be at least 5 MB.");
+
+        // Payloads up to the threshold go through a single PUT, which S3 caps at 5 GB — a larger threshold
+        // would transfer gigabytes only to be rejected server-side with EntityTooLarge.
+        if (options.MultipartThreshold <= 0 || options.MultipartThreshold > S3Client.MaxSinglePutSize)
+            return ValidateOptionsResult.Fail(
+                $"Property {nameof(ObjectStorageOptions.MultipartThreshold)}{connection} must be between 1 byte and 5 GB (the S3 single-PUT limit).");
 
         var hasProvider = (registry?.HasCredentialsProvider(name) ?? false)
             || (name.Length == 0 && credentialsProvider is not null);

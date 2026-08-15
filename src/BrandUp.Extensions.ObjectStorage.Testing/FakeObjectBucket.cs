@@ -15,7 +15,9 @@ public class FakeObjectBucket(string name, FakeObjectStore store) : IObjectBucke
     public async IAsyncEnumerable<ObjectListItem> ListAsync(
         string? keyPrefix = null, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        // Production listing of a missing bucket is 404 NoSuchBucket.
+        // Deferred like production: NoSuchBucket surfaces at first MoveNext, not at the call site,
+        // and the token is honored per item — so cancellation-sensitive code behaves the same way
+        // against the fake as against S3.
         RequireBucket();
 
         foreach (var item in Store.ListObjects(Name, BuildListPrefix(keyPrefix)))
@@ -24,6 +26,7 @@ public class FakeObjectBucket(string name, FakeObjectStore store) : IObjectBucke
             yield return item;
         }
 
+        // The store is synchronous; this no-op await keeps the async-iterator shape without CS1998.
         await Task.CompletedTask;
     }
 
@@ -68,7 +71,7 @@ public class FakeObjectBucket<TMetadata, TKey>(string name, string? prefix, Fake
         if (obj is null)
             return Task.FromResult<ObjectItem<TMetadata, TKey>?>(null);
 
-        return Task.FromResult<ObjectItem<TMetadata, TKey>?>(CreateItem(objectId, obj));
+        return Task.FromResult<ObjectItem<TMetadata, TKey>?>(CreateItem(objectId, obj, MaterializeMetadata(obj.Metadata)));
     }
 
     public Task<Stream?> OpenReadAsync(TKey objectId, CancellationToken cancellationToken = default)
@@ -80,10 +83,7 @@ public class FakeObjectBucket<TMetadata, TKey>(string name, string? prefix, Fake
         return Task.FromResult<Stream?>(new MemoryStream(obj.Content, writable: false));
     }
 
-    public Task<ObjectItem<TMetadata, TKey>> UploadAsync(TKey objectId, TMetadata metadata, Stream content, CancellationToken cancellationToken = default)
-        => UploadAsync(objectId, metadata, content, options: null, cancellationToken);
-
-    public async Task<ObjectItem<TMetadata, TKey>> UploadAsync(TKey objectId, TMetadata metadata, Stream content, UploadOptions? options, CancellationToken cancellationToken = default)
+    public async Task<ObjectItem<TMetadata, TKey>> UploadAsync(TKey objectId, TMetadata metadata, Stream content, UploadOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(metadata);
         ArgumentNullException.ThrowIfNull(content);
@@ -92,6 +92,8 @@ public class FakeObjectBucket<TMetadata, TKey>(string name, string? prefix, Fake
         // kind of missing-provisioning bug the fake exists to catch. Find/Read/Delete stay lenient (null/false),
         // matching the real client.
         RequireBucket();
+
+        UploadStreamGuard.ThrowIfConsumed(content);
 
         byte[] bytes;
         if (content.CanSeek)
@@ -107,9 +109,13 @@ public class FakeObjectBucket<TMetadata, TKey>(string name, string? prefix, Fake
         }
 
         var key = GetKey(objectId);
-        Store.PutObject(Name, key, bytes, metadata, options);
 
-        return CreateItem(objectId, Store.GetObject(Name, key)!);
+        // Snapshot the metadata: real S3 serializes it onto the wire, so reassigning the caller's
+        // instance properties after the upload must not change what is stored.
+        Store.PutObject(Name, key, bytes, MaterializeMetadata(metadata), options);
+
+        // Like production, the returned item carries the caller's own metadata instance.
+        return CreateItem(objectId, Store.GetObject(Name, key)!, metadata);
     }
 
     public Task<Uri> GetPresignedReadUrlAsync(TKey objectId, TimeSpan expiresIn, CancellationToken cancellationToken = default)
@@ -121,8 +127,7 @@ public class FakeObjectBucket<TMetadata, TKey>(string name, string? prefix, Fake
     // Deterministic fake URL carrying the bucket, the serialized key and the verb, so tests can assert them.
     Uri FakePresignedUrl(TKey objectId, TimeSpan expiresIn, bool write, string? contentType)
     {
-        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(expiresIn, TimeSpan.Zero);
-        ArgumentOutOfRangeException.ThrowIfGreaterThan(expiresIn, PresignedUrlLimits.MaxLifetime);
+        PresignedUrlLimits.Validate(expiresIn, nameof(expiresIn));
 
         // '/' stays a path separator, like in a real presigned URL; only the segments are escaped.
         var escapedKey = string.Join('/', GetKey(objectId).Split('/').Select(Uri.EscapeDataString));
@@ -139,19 +144,19 @@ public class FakeObjectBucket<TMetadata, TKey>(string name, string? prefix, Fake
         => Task.FromResult(Store.DeleteObject(Name, GetKey(objectId)));
 
     // private protected: the parameter type is internal, and only the in-assembly Guid subclass overrides it.
-    private protected virtual ObjectItem<TMetadata, TKey> CreateItem(TKey id, FakeStoredObject obj)
-        => new() { Id = id, Size = obj.Size, ETag = obj.ETag, Metadata = MaterializeMetadata(obj.Metadata) };
+    private protected virtual ObjectItem<TMetadata, TKey> CreateItem(TKey id, FakeStoredObject obj, TMetadata metadata)
+        => new() { Id = id, Size = obj.Size, ETag = obj.ETag, Metadata = metadata };
 
     /// <summary>
-    /// Mirrors production schema evolution for cross-type reads (two mappings on one destination):
-    /// matching properties copy over, everything else stays at its default — instead of an
-    /// InvalidCastException that production would never throw.
+    /// Materializes stored metadata as <typeparamref name="TMetadata"/>, mirroring production schema
+    /// evolution for cross-type reads (two mappings on one destination): assignable properties copy over,
+    /// string-convertible ones transfer through the same invariant-string codec production uses (a failed
+    /// conversion throws, like production), and properties absent from the stored type stay at their
+    /// defaults. Returns a fresh instance; the copy is top-level — reference-typed property values are
+    /// shared with the source, so treat stored metadata as read-only.
     /// </summary>
     private protected static TMetadata MaterializeMetadata(object stored)
     {
-        if (stored is TMetadata same)
-            return same;
-
         var result = Activator.CreateInstance<TMetadata>();
 
         foreach (var target in typeof(TMetadata).GetProperties())
@@ -160,10 +165,24 @@ public class FakeObjectBucket<TMetadata, TKey>(string name, string? prefix, Fake
                 continue;
 
             var source = stored.GetType().GetProperty(target.Name);
-            if (source is null || !source.CanRead || !target.PropertyType.IsAssignableFrom(source.PropertyType))
+            if (source is null || !source.CanRead)
                 continue;
 
-            target.SetValue(result, source.GetValue(stored));
+            var value = source.GetValue(stored);
+            if (value is null)
+                continue;
+
+            if (target.PropertyType.IsAssignableFrom(source.PropertyType))
+            {
+                target.SetValue(result, value);
+                continue;
+            }
+
+            // Cross-type property: production round-trips metadata through invariant strings, so a
+            // convertible value (int -> string, int -> long, ...) must read back populated here too.
+            var targetType = Nullable.GetUnderlyingType(target.PropertyType) ?? target.PropertyType;
+            target.SetValue(result, MetadataValueConverter.FromInvariantString(
+                MetadataValueConverter.ToInvariantString(value), targetType));
         }
 
         return result;
@@ -172,13 +191,11 @@ public class FakeObjectBucket<TMetadata, TKey>(string name, string? prefix, Fake
     string GetKey(TKey objectId)
     {
         ArgumentNullException.ThrowIfNull(objectId);
-
-        var id = _keySerializer(objectId);
-        return prefix is null ? id : $"{prefix}{DestinationValidator.ObjectKeyPrefixDelimiter}{id}";
+        return DestinationValidator.JoinKey(prefix, _keySerializer(objectId));
     }
 
     private protected sealed override string? BuildListPrefix(string? keyPrefix)
-        => prefix is null ? keyPrefix : $"{prefix}{DestinationValidator.ObjectKeyPrefixDelimiter}{keyPrefix}";
+        => DestinationValidator.JoinListPrefix(prefix, keyPrefix);
 }
 
 /// <summary>Guid-keyed fake bucket — the historic shape with <see cref="ObjectItem{TMetadata}"/> results.</summary>
@@ -186,15 +203,12 @@ public class FakeObjectBucket<TMetadata>(string name, string? prefix, FakeObject
     : FakeObjectBucket<TMetadata, Guid>(name, prefix, store), IObjectBucket<TMetadata>
     where TMetadata : class, IObjectMetadata
 {
-    private protected override ObjectItem<TMetadata, Guid> CreateItem(Guid id, FakeStoredObject obj)
-        => new ObjectItem<TMetadata> { Id = id, Size = obj.Size, ETag = obj.ETag, Metadata = MaterializeMetadata(obj.Metadata) };
+    private protected override ObjectItem<TMetadata, Guid> CreateItem(Guid id, FakeStoredObject obj, TMetadata metadata)
+        => new ObjectItem<TMetadata> { Id = id, Size = obj.Size, ETag = obj.ETag, Metadata = metadata };
 
     public new async Task<ObjectItem<TMetadata>?> FindOneAsync(Guid objectId, CancellationToken cancellationToken = default)
         => (ObjectItem<TMetadata>?)await base.FindOneAsync(objectId, cancellationToken);
 
-    public new async Task<ObjectItem<TMetadata>> UploadAsync(Guid objectId, TMetadata metadata, Stream content, CancellationToken cancellationToken = default)
-        => (ObjectItem<TMetadata>)await base.UploadAsync(objectId, metadata, content, cancellationToken);
-
-    public new async Task<ObjectItem<TMetadata>> UploadAsync(Guid objectId, TMetadata metadata, Stream content, UploadOptions? options, CancellationToken cancellationToken = default)
+    public new async Task<ObjectItem<TMetadata>> UploadAsync(Guid objectId, TMetadata metadata, Stream content, UploadOptions? options = null, CancellationToken cancellationToken = default)
         => (ObjectItem<TMetadata>)await base.UploadAsync(objectId, metadata, content, options, cancellationToken);
 }

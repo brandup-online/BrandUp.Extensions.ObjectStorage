@@ -15,8 +15,12 @@ public class FakeObjectStorageClient(FakeObjectStore store) : IObjectStorageClie
     {
         ArgumentNullException.ThrowIfNull(metadataType);
 
-        // Same rules as the real AddMapping path, so the fake rejects what production would reject;
-        // bucket-only lower-casing mirrors ObjectMapping.Create (object key prefixes are case-sensitive).
+        // Same rules as the real AddMapping path, so the fake rejects what production would reject:
+        // production's ObjectMapping.Create requires a parameterless constructor (same message), and
+        // bucket-only lower-casing mirrors it too (object key prefixes are case-sensitive).
+        if (metadataType.GetConstructor(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public, []) is null)
+            throw new ArgumentException($"Type {metadataType.FullName} has no public parameterless constructor.", nameof(metadataType));
+
         var (bucketName, prefix) = DestinationValidator.Split(
             DestinationValidator.Normalize(destination, nameof(destination)));
 

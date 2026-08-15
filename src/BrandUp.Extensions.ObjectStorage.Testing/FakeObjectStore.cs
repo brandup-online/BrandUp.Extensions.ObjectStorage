@@ -1,8 +1,10 @@
+using System.Net;
+using BrandUp.Extensions.ObjectStorage.Internals;
+
 namespace BrandUp.Extensions.ObjectStorage;
 
 /// <summary>
-/// In-memory хранилище для использования в тестах.
-/// Инжектируется как синглтон — позволяет проверять состояние между операциями.
+/// In-memory store for use in tests. Injected as a singleton, so state can be inspected between operations.
 /// </summary>
 public class FakeObjectStore
 {
@@ -40,12 +42,45 @@ public class FakeObjectStore
 
     public void CreateBucket(string bucketName, BucketSettings? settings = null)
     {
+        ValidateBucketName(bucketName);
+
         lock (_sync)
         {
             if (_buckets.ContainsKey(bucketName))
                 throw new InvalidOperationException($"Bucket '{bucketName}' already exists.");
             _buckets[bucketName] = new FakeBucketData(settings ?? new BucketSettings());
         }
+    }
+
+    // Real S3 rejects invalid names at creation (400 InvalidBucketName). Accepting e.g. an uppercase name
+    // here would create a bucket the mapping layer (which lowercases bucket names) could never reach.
+    // Structural rules ('..', start/end with letter or digit) come from the shared DestinationValidator;
+    // the ASCII-lowercase restriction is S3-specific and added on top.
+    static void ValidateBucketName(string bucketName)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(bucketName);
+
+        try
+        {
+            DestinationValidator.NormalizeBucketName(bucketName, nameof(bucketName));
+        }
+        catch (ArgumentException e)
+        {
+            throw Invalid(bucketName, e);
+        }
+
+        foreach (var c in bucketName)
+        {
+            if (c is (>= 'a' and <= 'z') or (>= '0' and <= '9') or '-' or '.')
+                continue;
+
+            throw Invalid(bucketName, new ArgumentException($"Invalid character '{c}' in bucket name.", nameof(bucketName)));
+        }
+
+        static ObjectStorageException Invalid(string bucketName, Exception inner) => new(
+            $"Invalid bucket name '{bucketName}': S3 bucket names may contain only lowercase letters, digits, " +
+            "'-' and '.', and must start and end with a letter or digit.",
+            HttpStatusCode.BadRequest, "InvalidBucketName", inner);
     }
 
     public void DropBucket(string bucketName)
@@ -73,6 +108,10 @@ public class FakeObjectStore
 
     public void PutObject(string bucketName, string key, byte[] content, object metadata, UploadOptions? options = null)
     {
+        // Same validation as CreateBucket — this public entry point auto-creates the bucket, and must not
+        // become a backdoor for names creation would reject.
+        ValidateBucketName(bucketName);
+
         lock (_sync)
             GetOrCreateBucket(bucketName).Objects[key] = new FakeStoredObject(content, metadata, options);
     }
