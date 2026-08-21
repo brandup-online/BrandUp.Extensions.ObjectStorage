@@ -2,7 +2,8 @@ namespace BrandUp.Extensions.ObjectStorage.Internals;
 
 internal class S3ObjectBucket(string name, IS3Client client) : IObjectBucket
 {
-    protected readonly IS3Client Client = client;
+    /// <summary>Connection this bucket talks to; compared by reference to decide whether a server-side copy is possible.</summary>
+    internal IS3Client Client { get; } = client;
 
     public string Name { get; } = name;
 
@@ -103,6 +104,31 @@ internal class S3ObjectBucket<TMetadata, TKey>(IS3Client client, ObjectMapping m
     public Task<bool> DeleteOneAsync(TKey objectId, CancellationToken cancellationToken = default)
         => Client.DeleteAsync(Name, GetObjectKey(objectId), cancellationToken);
 
+    public Task<bool> CopyToAsync<TTargetMetadata, TTargetKey>(
+        TKey objectId,
+        IObjectBucket<TTargetMetadata, TTargetKey> target,
+        TTargetKey targetObjectId,
+        TTargetMetadata targetMetadata,
+        UploadOptions? options = null,
+        CancellationToken cancellationToken = default)
+        where TTargetMetadata : class, IObjectMetadata
+        where TTargetKey : notnull
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        ArgumentNullException.ThrowIfNull(targetMetadata);
+
+        // CopyObject is one request inside one account, so a bucket of another connection is out of reach.
+        // Falling back to read+upload would quietly do the very thing this method exists to avoid.
+        if (target is not S3ObjectBucket<TTargetMetadata, TTargetKey> s3Target || !ReferenceEquals(s3Target.Client, Client))
+            throw CopyTarget.Mismatch(this, target);
+
+        // Key and metadata are composed by the target's own mapping — its prefix, its key serializer.
+        return Client.CopyAsync(
+            Name, GetObjectKey(objectId),
+            s3Target.Name, s3Target.GetObjectKey(targetObjectId), s3Target.SerializeMetadata(targetMetadata),
+            options, cancellationToken);
+    }
+
     public Task<Uri> GetPresignedReadUrlAsync(TKey objectId, TimeSpan expiresIn, CancellationToken cancellationToken = default)
         => Client.GetPresignedUrlAsync(Name, GetObjectKey(objectId), expiresIn, forWrite: false, contentType: null, cancellationToken);
 
@@ -116,14 +142,19 @@ internal class S3ObjectBucket<TMetadata, TKey>(IS3Client client, ObjectMapping m
     private protected sealed override string? BuildListPrefix(string? keyPrefix)
         => DestinationValidator.JoinListPrefix(mapping.ObjectKeyPrefix, keyPrefix);
 
-    string GetObjectKey(TKey objectId)
+    // internal: a copy composes the key and the metadata through the target bucket, which is a different
+    // generic instantiation and cannot reach private members.
+    internal string GetObjectKey(TKey objectId)
     {
         ArgumentNullException.ThrowIfNull(objectId);
         return mapping.GetObjectKey(_keySerializer(objectId));
     }
+
+    internal IDictionary<string, string> SerializeMetadata(TMetadata metadata)
+        => mapping.Serialize(metadata);
 }
 
-/// <summary>Guid-keyed bucket — the historic shape with <see cref="ObjectItem{TMetadata}"/> results.</summary>
+/// <summary>Guid-keyed bucket, with <see cref="ObjectItem{TMetadata}"/> results.</summary>
 internal sealed class S3ObjectBucket<TMetadata>(IS3Client client, ObjectMapping mapping)
     : S3ObjectBucket<TMetadata, Guid>(client, mapping), IObjectBucket<TMetadata>
     where TMetadata : class, IObjectMetadata

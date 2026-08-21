@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Net;
 using System.Text.RegularExpressions;
+using System.Threading.Channels;
 using Amazon.Runtime;
 using Amazon.S3;
 using Amazon.S3.Model;
@@ -15,6 +16,7 @@ internal class S3Client : IS3Client, IDisposable
     readonly AmazonS3Client _s3;
     readonly int _multipartPartSize;
     readonly long _multipartThreshold;
+    readonly int _multipartParallelism;
 
     // Created per connection by S3ClientFactory; credentialsProvider is the one registered for that connection
     // (null for static or session-token credentials).
@@ -24,6 +26,7 @@ internal class S3Client : IS3Client, IDisposable
 
         _multipartPartSize = opts.MultipartPartSize;
         _multipartThreshold = opts.MultipartThreshold;
+        _multipartParallelism = Math.Clamp(opts.MultipartParallelism, 1, ObjectStorageOptions.MaxMultipartParallelism);
 
         // Built once: a RefreshingAWSCredentials renews temp creds in place, so the singleton client is never recreated.
         _s3 = new AmazonS3Client(CreateCredentials(opts, credentialsProvider), new AmazonS3Config
@@ -73,7 +76,8 @@ internal class S3Client : IS3Client, IDisposable
     internal const long MaxSinglePutSize = 5L * 1024 * 1024 * 1024;
 
     // A non-seekable stream has an unknown length, so the part size doubles every GrowPartEvery parts
-    // (see Parts) up to the cap — long streams fit the 10,000-part limit with bounded memory.
+    // (see MultipartUploadAsync) up to the cap — long streams fit the 10,000-part limit with memory
+    // bounded by MultipartParallelism x the current part size.
     internal const int GrowPartEvery = 1_000;
     internal const int MaxGrownPartSize = 512 * 1024 * 1024;
 
@@ -100,27 +104,16 @@ internal class S3Client : IS3Client, IDisposable
             if (contentLength <= _multipartThreshold)
                 return await PutObjectAsync(bucketName, objectKey, metadata, stream, contentLength, options, cancellationToken);
 
-            // A scaled-up part (payload > MaxParts * configured part size) is a rare, huge buffer: renting
-            // it would round up to the next power-of-two pool bucket (~2x waste) and park it in the shared
-            // pool for the process lifetime, so such buffers are allocated directly instead.
+            // The length is known up front, so the part size is fixed. The upload takes over the buffer.
             var partSize = ComputePartSize(contentLength, _multipartPartSize);
-            var pooled = partSize == _multipartPartSize;
-            var buffer = pooled ? ArrayPool<byte>.Shared.Rent(partSize) : GC.AllocateUninitializedArray<byte>(partSize);
-            try
-            {
-                return await MultipartUploadAsync(bucketName, objectKey, metadata, options,
-                    Parts(buffer, partSize, firstRead: 0, stream, growable: false, cancellationToken), cancellationToken);
-            }
-            finally
-            {
-                if (pooled)
-                    ArrayPool<byte>.Shared.Return(buffer);
-            }
+            return await MultipartUploadAsync(bucketName, objectKey, metadata, options,
+                new MultipartSource(stream, partSize, FirstRead: 0, RentPartBuffer(partSize), Growable: false), cancellationToken);
         }
 
         // Non-seekable: read the first part; a stream shorter than one part takes the simple path, so memory
         // is bounded by the part size instead of the whole payload.
         var firstBuffer = ArrayPool<byte>.Shared.Rent(_multipartPartSize);
+        var handedOver = false;
         try
         {
             var read = await stream.ReadAtLeastAsync(
@@ -132,12 +125,15 @@ internal class S3Client : IS3Client, IDisposable
                 return await PutObjectAsync(bucketName, objectKey, metadata, single, read, options, cancellationToken);
             }
 
+            // From here the upload owns the buffer and returns it to the pool itself.
+            handedOver = true;
             return await MultipartUploadAsync(bucketName, objectKey, metadata, options,
-                Parts(firstBuffer, _multipartPartSize, read, stream, growable: true, cancellationToken), cancellationToken);
+                new MultipartSource(stream, _multipartPartSize, read, new PartBuffer(firstBuffer, Pooled: true), Growable: true), cancellationToken);
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(firstBuffer);
+            if (!handedOver)
+                ArrayPool<byte>.Shared.Return(firstBuffer);
         }
     }
 
@@ -168,58 +164,68 @@ internal class S3Client : IS3Client, IDisposable
     }
 
     /// <summary>
-    /// Splits any stream into parts over one shared (pooled) buffer. Parts are consumed strictly
-    /// sequentially (each UploadPart completes before the next part is read), so a single buffer serves
-    /// the whole upload — no per-part allocations. Do not parallelize part uploads without revisiting this.
-    /// Buffering also keeps the SDK away from the caller's stream: UploadPart offers no AutoCloseStream
-    /// and no exact-read guarantee, so feeding it the source directly is not safe.
-    /// When <paramref name="growable"/> (non-seekable source of unknown length), the part size doubles
-    /// every <see cref="GrowPartEvery"/> parts up to <see cref="MaxGrownPartSize"/>, so long streams fit
-    /// the 10,000-part S3 limit with bounded memory. The initial buffer is owned (rented and returned) by
-    /// the caller; grown buffers are rented and returned here.
+    /// A part buffer and how it was obtained, so whoever holds it can release it correctly.
+    /// <c>default</c> is a free slot with no array behind it yet.
     /// </summary>
-    static async IAsyncEnumerable<MemoryStream> Parts(
-        byte[] buffer, int partSize, int firstRead, Stream stream, bool growable,
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    readonly record struct PartBuffer(byte[]? Array, bool Pooled);
+
+    /// <summary>
+    /// Only the configured part size is worth pooling. A larger part is rare and huge, and renting it would
+    /// park hundreds of megabytes in the shared pool for the process lifetime, so it is allocated directly.
+    /// </summary>
+    PartBuffer RentPartBuffer(int size)
+        => size == _multipartPartSize
+            ? new PartBuffer(ArrayPool<byte>.Shared.Rent(size), Pooled: true)
+            : new PartBuffer(GC.AllocateUninitializedArray<byte>(size), Pooled: false);
+
+    static void ReturnPartBuffer(PartBuffer buffer)
     {
-        var initialBuffer = buffer;
-        try
-        {
-            if (firstRead > 0)
-                yield return new MemoryStream(buffer, 0, firstRead, writable: false);
-
-            var partsProduced = firstRead > 0 ? 1 : 0;
-            while (true)
-            {
-                if (growable && partsProduced > 0 && partsProduced % GrowPartEvery == 0 && partSize < MaxGrownPartSize)
-                {
-                    partSize = (int)Math.Min(2L * partSize, MaxGrownPartSize);
-                    if (!ReferenceEquals(buffer, initialBuffer))
-                        ArrayPool<byte>.Shared.Return(buffer);
-                    buffer = ArrayPool<byte>.Shared.Rent(partSize);
-                }
-
-                var read = await stream.ReadAtLeastAsync(
-                    buffer.AsMemory(0, partSize), partSize, throwOnEndOfStream: false, cancellationToken);
-                if (read == 0)
-                    yield break;
-
-                yield return new MemoryStream(buffer, 0, read, writable: false);
-                partsProduced++;
-            }
-        }
-        finally
-        {
-            if (!ReferenceEquals(buffer, initialBuffer))
-                ArrayPool<byte>.Shared.Return(buffer);
-        }
+        if (buffer is { Array: not null, Pooled: true })
+            ArrayPool<byte>.Shared.Return(buffer.Array);
     }
 
+    /// <summary>
+    /// What a multipart upload reads from: the stream, the part size, and the first buffer — already holding
+    /// <see cref="FirstRead"/> bytes if the caller had to peek at the stream to pick this path.
+    /// </summary>
+    readonly record struct MultipartSource(
+        Stream Stream, int PartSize, int FirstRead, PartBuffer FirstBuffer, bool Growable);
+
+    /// <summary>
+    /// Uploads a stream as multipart, with up to <c>MultipartParallelism</c> parts in flight. Reading is
+    /// sequential — a stream has one position — so only the transfers overlap: the reader takes a buffer from
+    /// a pool of that many, and each upload returns its own as soon as its part is on the wire. Memory stays
+    /// at parallelism x the part size, and a slow network slows reading instead of growing the pool.
+    /// <para>
+    /// Parts are buffered rather than fed to the SDK directly: UploadPart offers no AutoCloseStream and no
+    /// exact-read guarantee, so handing it the caller's stream is not safe.
+    /// </para>
+    /// <para>
+    /// When the length is unknown (non-seekable stream) the part size doubles every
+    /// <see cref="GrowPartEvery"/> parts up to <see cref="MaxGrownPartSize"/>, so long streams fit the
+    /// 10,000-part S3 limit; buffers below the new size are replaced as they come free. S3 allows parts to
+    /// differ in size — only the last may be under 5 MB.
+    /// </para>
+    /// </summary>
     async Task<S3StorageObject> MultipartUploadAsync(
         string bucketName, string objectKey, IDictionary<string, string> metadata, UploadOptions? options,
-        IAsyncEnumerable<MemoryStream> parts, CancellationToken cancellationToken)
+        MultipartSource source, CancellationToken cancellationToken)
     {
+        // The pool is the bound: the reader waits here for a free buffer, so no more than `parallelism`
+        // parts are ever in flight. Only the reader takes from it.
+        var free = Channel.CreateUnbounded<PartBuffer>(new UnboundedChannelOptions { SingleReader = true });
+        for (var i = 1; i < _multipartParallelism; i++)
+            free.Writer.TryWrite(default);
+
+        var uploads = new List<Task<PartETag>>();
+        var etags = new List<PartETag>();
+
+        var current = source.FirstBuffer;
+        var holding = true;
+        var partSize = source.PartSize;
         string? uploadId = null;
+        long uploaded = 0;
+
         try
         {
             var initiate = new InitiateMultipartUploadRequest { BucketName = bucketName, Key = objectKey };
@@ -228,55 +234,154 @@ internal class S3Client : IS3Client, IDisposable
 
             uploadId = (await _s3.InitiateMultipartUploadAsync(initiate, cancellationToken)).UploadId;
 
-            var etags = new List<PartETag>();
-            long uploaded = 0;
             var partNumber = 1;
 
-            await foreach (var content in parts)
+            while (true)
             {
+                if (!holding)
+                {
+                    current = await free.Reader.ReadAsync(cancellationToken);
+                    holding = true;
+                }
+
+                // Collect what finished meanwhile, and rethrow a failed part here rather than reading on
+                // into an upload that is about to be aborted.
+                for (var i = uploads.Count - 1; i >= 0; i--)
+                {
+                    if (!uploads[i].IsCompleted)
+                        continue;
+
+                    etags.Add(await uploads[i]);
+                    uploads.RemoveAt(i);
+                }
+
+                if (source.Growable && partNumber > 1 && (partNumber - 1) % GrowPartEvery == 0 && partSize < MaxGrownPartSize)
+                    partSize = (int)Math.Min(2L * partSize, MaxGrownPartSize);
+
+                if (current.Array is null || current.Array.Length < partSize)
+                {
+                    // Drop the reference before releasing: if the rent below throws, the finally must not
+                    // return an array that is already in the pool. ArrayPool does not detect a double return
+                    // — it hands the same array to two renters.
+                    var stale = current;
+                    current = default;
+                    ReturnPartBuffer(stale);
+
+                    current = RentPartBuffer(partSize);
+                }
+
+                // The first part is already in the buffer: the caller read it to choose the multipart path.
+                var read = partNumber == 1 && source.FirstRead > 0
+                    ? source.FirstRead
+                    : await source.Stream.ReadAtLeastAsync(
+                        current.Array.AsMemory(0, partSize), partSize, throwOnEndOfStream: false, cancellationToken);
+
+                if (read == 0)
+                    break;
+
                 if (partNumber > MaxParts)
                     throw new InvalidOperationException(
                         $"Object exceeds the S3 limit of {MaxParts} multipart parts. " +
                         "Supply a seekable stream so the part size can be computed from the payload length up front.");
 
-                using (content)
-                {
-                    var part = await _s3.UploadPartAsync(new UploadPartRequest
-                    {
-                        BucketName = bucketName,
-                        Key = objectKey,
-                        UploadId = uploadId,
-                        PartNumber = partNumber,
-                        PartSize = content.Length,
-                        InputStream = content,
-                        DisableDefaultChecksumValidation = true
-                    }, cancellationToken);
+                // The task owns the buffer from here and releases it itself, so the reader must let go of
+                // it before anything else can throw.
+                var upload = UploadPartAsync(current, partNumber, read);
+                current = default;
+                holding = false;
+                uploads.Add(upload);
 
-                    etags.Add(new PartETag(partNumber, part.ETag));
-                    uploaded += content.Length;
-                    partNumber++;
-                }
+                uploaded += read;
+                partNumber++;
             }
+
+            foreach (var upload in uploads)
+                etags.Add(await upload);
+
+            uploads.Clear();
 
             var completed = await _s3.CompleteMultipartUploadAsync(new CompleteMultipartUploadRequest
             {
                 BucketName = bucketName,
                 Key = objectKey,
                 UploadId = uploadId,
-                PartETags = etags
+                // Parts complete out of order, so the manifest is sorted rather than assumed to be in order.
+                PartETags = [.. etags.OrderBy(e => e.PartNumber)]
             }, cancellationToken);
 
             return new S3StorageObject(objectKey, uploaded, completed.ETag, metadata);
         }
         catch (AmazonS3Exception ex)
         {
-            await AbortSafeAsync();
+            await AbandonAsync();
             throw Wrap(ex);
         }
         catch
         {
-            await AbortSafeAsync();
+            await AbandonAsync();
             throw;
+        }
+        finally
+        {
+            // Buffers go back to the shared pool here, so nothing may still be reading from them.
+            await SettleInFlightAsync();
+
+            if (holding)
+                ReturnPartBuffer(current);
+
+            free.Writer.TryComplete();
+            while (free.Reader.TryRead(out var buffer))
+                ReturnPartBuffer(buffer);
+        }
+
+        async Task<PartETag> UploadPartAsync(PartBuffer buffer, int partNumber, int length)
+        {
+            try
+            {
+                using var content = new MemoryStream(buffer.Array!, 0, length, writable: false);
+
+                var part = await _s3.UploadPartAsync(new UploadPartRequest
+                {
+                    BucketName = bucketName,
+                    Key = objectKey,
+                    UploadId = uploadId,
+                    PartNumber = partNumber,
+                    PartSize = length,
+                    InputStream = content,
+                    DisableDefaultChecksumValidation = true
+                }, cancellationToken);
+
+                return new PartETag(partNumber, part.ETag);
+            }
+            finally
+            {
+                // Give the buffer back whatever the outcome: the request is over, and the reader may be
+                // waiting for it.
+                free.Writer.TryWrite(buffer);
+            }
+        }
+
+        // Waits for every part still on the wire. A request that outlived the abort would keep its part
+        // stored (and billed), and its buffer must not return to the pool while it is still being read.
+        async Task SettleInFlightAsync()
+        {
+            foreach (var upload in uploads)
+            {
+                try
+                {
+                    await upload;
+                }
+                catch
+                {
+                    // the original failure matters more
+                }
+            }
+        }
+
+        async Task AbandonAsync()
+        {
+            await SettleInFlightAsync();
+            await AbortSafeAsync();
         }
 
         // Best-effort cleanup: an abandoned multipart upload keeps storing (and billing) its parts.
@@ -301,10 +406,243 @@ internal class S3Client : IS3Client, IDisposable
         }
     }
 
+    public async Task<bool> CopyAsync(
+        string sourceBucketName, string sourceObjectKey,
+        string targetBucketName, string targetObjectKey,
+        IDictionary<string, string> metadata, UploadOptions? options, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(sourceBucketName);
+        ArgumentException.ThrowIfNullOrEmpty(sourceObjectKey);
+        ArgumentException.ThrowIfNullOrEmpty(targetBucketName);
+        ArgumentException.ThrowIfNullOrEmpty(targetObjectKey);
+        ArgumentNullException.ThrowIfNull(metadata);
+
+        // One HEAD answers three questions: does the source exist, does it fit a single CopyObject, and
+        // which headers to carry over when the caller gave no options.
+        GetObjectMetadataResponse source;
+        try
+        {
+            source = await _s3.GetObjectMetadataAsync(new GetObjectMetadataRequest
+            {
+                BucketName = sourceBucketName,
+                Key = sourceObjectKey
+            }, cancellationToken);
+        }
+        catch (AmazonS3Exception ex)
+        {
+            return ex.StatusCode switch
+            {
+                HttpStatusCode.NotFound => false,
+                _ => throw Wrap(ex)
+            };
+        }
+
+        // No size check against MaxObjectSize: an object above it could not have been stored in the first place.
+        var contentLength = source.ContentLength;
+        if (contentLength > MaxSinglePutSize)
+            return await MultipartCopyAsync(
+                sourceBucketName, sourceObjectKey, targetBucketName, targetObjectKey,
+                metadata, options, source.Headers, contentLength, source.ETag, cancellationToken);
+
+        // Not pinned to the source ETag: one CopyObject reads one version atomically, so an overwrite
+        // mid-copy cannot tear the result, and failing the copy over a routine overwrite would be worse.
+        try
+        {
+            var request = new CopyObjectRequest
+            {
+                SourceBucket = sourceBucketName,
+                SourceKey = sourceObjectKey,
+                DestinationBucket = targetBucketName,
+                DestinationKey = targetObjectKey,
+                // The copy is served by the target mapping, so the source metadata is replaced, not inherited.
+                MetadataDirective = S3MetadataDirective.REPLACE
+            };
+
+            ApplyCopyHeaders(request.Headers, options, source.Headers);
+            ApplyMetadata(request.Metadata, metadata);
+
+            await _s3.CopyObjectAsync(request, cancellationToken);
+            return true;
+        }
+        catch (AmazonS3Exception ex) when (ex.ErrorCode == "NoSuchKey")
+        {
+            // The source was removed between the HEAD and the copy — same answer as if it had never been there.
+            return false;
+        }
+        catch (AmazonS3Exception ex)
+        {
+            throw Wrap(ex);
+        }
+    }
+
+    /// <summary>
+    /// Copies an object above the 5 GB single-copy limit range by range, server-side, up to
+    /// <c>MultipartParallelism</c> ranges at once. <see cref="ComputePartSize"/> keeps the part count within
+    /// <see cref="MaxParts"/>.
+    /// <para>
+    /// The ranges are separate requests, so each is pinned to <paramref name="sourceETag"/>: overwriting the
+    /// source mid-copy fails the operation (412) instead of stitching the copy out of two versions.
+    /// </para>
+    /// </summary>
+    async Task<bool> MultipartCopyAsync(
+        string sourceBucketName, string sourceObjectKey,
+        string targetBucketName, string targetObjectKey,
+        IDictionary<string, string> metadata, UploadOptions? options, HeadersCollection sourceHeaders,
+        long contentLength, string sourceETag, CancellationToken cancellationToken)
+    {
+        string? uploadId = null;
+        try
+        {
+            // Metadata and headers of a multipart object are fixed at initiation, not at completion.
+            var initiate = new InitiateMultipartUploadRequest { BucketName = targetBucketName, Key = targetObjectKey };
+            ApplyCopyHeaders(initiate.Headers, options, sourceHeaders);
+            ApplyMetadata(initiate.Metadata, metadata);
+
+            uploadId = (await _s3.InitiateMultipartUploadAsync(initiate, cancellationToken)).UploadId;
+
+            var ranges = CopyPartRanges(contentLength, ComputePartSize(contentLength, _multipartPartSize)).ToArray();
+            var etags = new PartETag[ranges.Length];
+
+            // No payload passes through the process, so the ranges are simply fanned out: a fixed set of
+            // workers takes the next one until the list runs out or one of them fails.
+            var next = -1;
+            var failed = false;
+
+            async Task CopyWorkerAsync()
+            {
+                while (!Volatile.Read(ref failed))
+                {
+                    var index = Interlocked.Increment(ref next);
+                    if (index >= ranges.Length)
+                        return;
+
+                    var range = ranges[index];
+                    try
+                    {
+                        var part = await _s3.CopyPartAsync(new CopyPartRequest
+                        {
+                            SourceBucket = sourceBucketName,
+                            SourceKey = sourceObjectKey,
+                            DestinationBucket = targetBucketName,
+                            DestinationKey = targetObjectKey,
+                            UploadId = uploadId,
+                            PartNumber = range.PartNumber,
+                            FirstByte = range.FirstByte,
+                            LastByte = range.LastByte,
+                            ETagToMatch = [sourceETag]
+                        }, cancellationToken);
+
+                        etags[index] = new PartETag(range.PartNumber, part.ETag);
+                    }
+                    catch
+                    {
+                        // Stop the other workers instead of copying gigabytes that are about to be aborted.
+                        Volatile.Write(ref failed, true);
+                        throw;
+                    }
+                }
+            }
+
+            // WhenAll settles every worker before the catch aborts the upload, so no copy outlives the abort.
+            await Task.WhenAll(Enumerable
+                .Range(0, Math.Min(_multipartParallelism, ranges.Length))
+                .Select(_ => CopyWorkerAsync()));
+
+            // A worker that sees the failure flag stops without claiming its range, so a hole would mean
+            // completing an upload with parts missing. WhenAll faults before that can happen, but this
+            // branch needs an object above 5 GB to run, so the invariant is checked rather than assumed.
+            if (Array.IndexOf(etags, null) >= 0)
+                throw new InvalidOperationException(
+                    $"Multipart copy of '{sourceObjectKey}' produced an incomplete part manifest.");
+
+            await _s3.CompleteMultipartUploadAsync(new CompleteMultipartUploadRequest
+            {
+                BucketName = targetBucketName,
+                Key = targetObjectKey,
+                UploadId = uploadId,
+                PartETags = [.. etags]
+            }, cancellationToken);
+
+            return true;
+        }
+        catch (AmazonS3Exception ex) when (ex.ErrorCode == "NoSuchKey")
+        {
+            // The source was removed between the HEAD and the copy — same answer as the single-request path.
+            await AbortSafeAsync();
+            return false;
+        }
+        catch (AmazonS3Exception ex)
+        {
+            await AbortSafeAsync();
+            throw Wrap(ex);
+        }
+        catch
+        {
+            await AbortSafeAsync();
+            throw;
+        }
+
+        // Best-effort cleanup: an abandoned multipart upload keeps storing (and billing) its parts.
+        async Task AbortSafeAsync()
+        {
+            if (uploadId is null)
+                return;
+
+            try
+            {
+                await _s3.AbortMultipartUploadAsync(new AbortMultipartUploadRequest
+                {
+                    BucketName = targetBucketName,
+                    Key = targetObjectKey,
+                    UploadId = uploadId
+                }, CancellationToken.None);
+            }
+            catch
+            {
+                // the original failure matters more
+            }
+        }
+    }
+
+    /// <summary>
+    /// Inclusive byte ranges of a multipart copy — contiguous, non-overlapping, covering the object exactly.
+    /// Separate from <see cref="MultipartCopyAsync"/> so it can be tested: that path needs an object above
+    /// 5 GB to run.
+    /// </summary>
+    internal static IEnumerable<CopyPartRange> CopyPartRanges(long contentLength, int partSize)
+    {
+        var partNumber = 1;
+        for (long position = 0; position < contentLength; position += partSize)
+            yield return new CopyPartRange(partNumber++, position, Math.Min(position + partSize, contentLength) - 1);
+    }
+
+    internal readonly record struct CopyPartRange(int PartNumber, long FirstByte, long LastByte);
+
     static void ApplyMetadata(MetadataCollection target, IDictionary<string, string> metadata)
     {
         foreach (var kv in metadata)
             target.Add(EncodeMetadataKey(kv.Key), EncodeMetadataValue(kv.Value));
+    }
+
+    /// <summary>
+    /// Headers of a copy. <c>MetadataDirective.REPLACE</c> clears every system header, so without options
+    /// all of them are carried over from the source — a gzip asset that lost its <c>Content-Encoding</c>
+    /// would reach the browser unreadable. Options, when given, replace the headers rather than merge.
+    /// </summary>
+    static void ApplyCopyHeaders(HeadersCollection target, UploadOptions? options, HeadersCollection source)
+    {
+        if (options is not null)
+        {
+            ApplyOptions(target, options);
+            return;
+        }
+
+        target.ContentType = source.ContentType;
+        target.CacheControl = source.CacheControl;
+        target.ContentDisposition = source.ContentDisposition;
+        target.ContentEncoding = source.ContentEncoding;
+        target.ContentLanguage = source.ContentLanguage;
+        target.Expires = source.Expires;
     }
 
     static void ApplyOptions(HeadersCollection headers, UploadOptions? options)

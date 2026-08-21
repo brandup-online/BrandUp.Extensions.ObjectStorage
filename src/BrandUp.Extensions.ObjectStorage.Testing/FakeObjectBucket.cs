@@ -48,6 +48,12 @@ public class FakeObjectBucket(string name, FakeObjectStore store) : IObjectBucke
         return Task.CompletedTask;
     }
 
+    // A copy reaches into the target bucket, which is a different generic instantiation and cannot touch
+    // the private protected members through its own type — these internal handles are how it gets there.
+    internal FakeObjectStore StoreOfBucket => Store;
+
+    internal void RequireBucketExists() => RequireBucket();
+
     /// <summary>Same shape as a real provider when the bucket does not exist (404 NoSuchBucket).</summary>
     private protected void RequireBucket()
     {
@@ -143,6 +149,52 @@ public class FakeObjectBucket<TMetadata, TKey>(string name, string? prefix, Fake
     public Task<bool> DeleteOneAsync(TKey objectId, CancellationToken cancellationToken = default)
         => Task.FromResult(Store.DeleteObject(Name, GetKey(objectId)));
 
+    // async, so a missing target bucket comes back as a faulted Task, the way it does against S3.
+    public async Task<bool> CopyToAsync<TTargetMetadata, TTargetKey>(
+        TKey objectId,
+        IObjectBucket<TTargetMetadata, TTargetKey> target,
+        TTargetKey targetObjectId,
+        TTargetMetadata targetMetadata,
+        UploadOptions? options = null,
+        CancellationToken cancellationToken = default)
+        where TTargetMetadata : class, IObjectMetadata
+        where TTargetKey : notnull
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        ArgumentNullException.ThrowIfNull(targetMetadata);
+
+        // S3 refuses a target outside the connection, so the fake must too — otherwise tests would pass
+        // on a copy that cannot work for real.
+        if (target is not FakeObjectBucket<TTargetMetadata, TTargetKey> fakeTarget
+            || !ReferenceEquals(fakeTarget.StoreOfBucket, Store))
+            throw CopyTarget.Mismatch(this, target);
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        // The S3 path composes the target key and metadata before the HEAD, so an invalid target throws
+        // whether or not the source exists. Compose them first here too.
+        var targetKey = fakeTarget.ObjectKeyOf(targetObjectId);
+        var snapshot = fakeTarget.SnapshotMetadata(targetMetadata);
+
+        // Only then the source lookup: the HEAD comes before the target is touched, so a missing source
+        // answers false even when the target bucket is missing as well.
+        var source = Store.GetObject(Name, GetKey(objectId));
+        if (source is null)
+            return false;
+
+        fakeTarget.RequireBucketExists();
+
+        // A server-side copy produces an independent object, so the content is cloned: PutObject keeps the
+        // caller's array, and a test that seeds an object and reuses its buffer must not change the copy.
+        Store.PutObject(fakeTarget.Name, targetKey, [.. source.Content], snapshot,
+            options ?? source.UploadOptions);
+
+        // The store is synchronous; this no-op await keeps the async shape without CS1998.
+        await Task.CompletedTask;
+
+        return true;
+    }
+
     // private protected: the parameter type is internal, and only the in-assembly Guid subclass overrides it.
     private protected virtual ObjectItem<TMetadata, TKey> CreateItem(TKey id, FakeStoredObject obj, TMetadata metadata)
         => new() { Id = id, Size = obj.Size, ETag = obj.ETag, Metadata = metadata };
@@ -194,11 +246,15 @@ public class FakeObjectBucket<TMetadata, TKey>(string name, string? prefix, Fake
         return DestinationValidator.JoinKey(prefix, _keySerializer(objectId));
     }
 
+    internal string ObjectKeyOf(TKey objectId) => GetKey(objectId);
+
+    internal object SnapshotMetadata(TMetadata metadata) => MaterializeMetadata(metadata);
+
     private protected sealed override string? BuildListPrefix(string? keyPrefix)
         => DestinationValidator.JoinListPrefix(prefix, keyPrefix);
 }
 
-/// <summary>Guid-keyed fake bucket — the historic shape with <see cref="ObjectItem{TMetadata}"/> results.</summary>
+/// <summary>Guid-keyed fake bucket, with <see cref="ObjectItem{TMetadata}"/> results.</summary>
 public class FakeObjectBucket<TMetadata>(string name, string? prefix, FakeObjectStore store)
     : FakeObjectBucket<TMetadata, Guid>(name, prefix, store), IObjectBucket<TMetadata>
     where TMetadata : class, IObjectMetadata

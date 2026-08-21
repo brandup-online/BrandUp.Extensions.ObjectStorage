@@ -33,6 +33,30 @@ public interface IObjectBucket<TMetadata, TKey> : IObjectBucket
     Task<ObjectItem<TMetadata, TKey>> UploadAsync(TKey objectId, TMetadata metadata, Stream content, UploadOptions? options, CancellationToken cancellationToken = default);
     Task<bool> DeleteOneAsync(TKey objectId, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Server-side copy of the object into <paramref name="target"/>: the payload never travels through the
+    /// caller. Returns <see langword="false"/> when the source object does not exist.
+    /// <para>
+    /// The copy is written with <paramref name="targetMetadata"/> and nothing is inherited from the source,
+    /// so the target may serve a different metadata type and a different key type; its object key is composed
+    /// by the target bucket's own mapping. Without <paramref name="options"/> the HTTP headers are carried
+    /// over from the source object. Copying onto itself is allowed — that is how metadata is rewritten in place.
+    /// </para>
+    /// <para>
+    /// Both buckets must belong to one storage connection; otherwise the call throws
+    /// <see cref="InvalidOperationException"/> rather than stream the bytes through the process.
+    /// </para>
+    /// </summary>
+    Task<bool> CopyToAsync<TTargetMetadata, TTargetKey>(
+        TKey objectId,
+        IObjectBucket<TTargetMetadata, TTargetKey> target,
+        TTargetKey targetObjectId,
+        TTargetMetadata targetMetadata,
+        UploadOptions? options = null,
+        CancellationToken cancellationToken = default)
+        where TTargetMetadata : class, IObjectMetadata
+        where TTargetKey : notnull;
+
     // Default implementation, so implementers define exactly one upload method.
     Task<ObjectItem<TMetadata, TKey>> UploadAsync(TKey objectId, TMetadata metadata, Stream content, CancellationToken cancellationToken = default)
         => UploadAsync(objectId, metadata, content, options: null, cancellationToken);
@@ -49,8 +73,8 @@ public interface IObjectBucket<TMetadata, TKey> : IObjectBucket
 }
 
 /// <summary>
-/// Bucket keyed by <see cref="Guid"/> — the historic default. The <c>new</c> members narrow the item type
-/// to <see cref="ObjectItem{TMetadata}"/>, so existing code keeps compiling unchanged.
+/// Bucket keyed by <see cref="Guid"/> — the common case. The <c>new</c> members narrow the item type to
+/// <see cref="ObjectItem{TMetadata}"/>.
 /// </summary>
 public interface IObjectBucket<TMetadata> : IObjectBucket<TMetadata, Guid>
     where TMetadata : class, IObjectMetadata

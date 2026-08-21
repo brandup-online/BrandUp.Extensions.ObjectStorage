@@ -130,5 +130,8 @@ public class BucketSettingsWriteTests
             => throw new NotSupportedException();
         public Task<Stream?> ReadAsync(string bucketName, string objectKey, CancellationToken ct) => throw new NotSupportedException();
         public Task<bool> DeleteAsync(string bucketName, string objectKey, CancellationToken ct) => throw new NotSupportedException();
+        public Task<bool> CopyAsync(string sourceBucketName, string sourceObjectKey, string targetBucketName, string targetObjectKey,
+            IDictionary<string, string> metadata, UploadOptions? options, CancellationToken ct)
+            => throw new NotSupportedException();
     }
 }

@@ -120,6 +120,22 @@ public class CredentialsTests
     }
 
     [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(65)]    // above the guard ceiling: the setting multiplies the buffer memory of every upload
+    public void Validator_MultipartParallelismOutOfRange_Fails(int parallelism)
+    {
+        var opts = BaseOptions();
+        opts.AccessKeyId = "ak";
+        opts.SecretAccessKey = "sk";
+        opts.MultipartParallelism = parallelism;
+
+        var result = new ObjectStorageOptionsValidator().Validate(null, opts);
+        Assert.True(result.Failed);
+        Assert.Contains(nameof(ObjectStorageOptions.MultipartParallelism), result.FailureMessage);
+    }
+
+    [Theory]
     [InlineData(null, "us-east-1")]
     [InlineData("http://localhost:9000", null)]
     public void Validator_MissingServiceUrlOrRegion_FailsEvenWithProvider(string? serviceUrl, string? region)

@@ -227,6 +227,13 @@ public class EnsureBucketsTests
         public Task<Uri> GetPresignedWriteUrlAsync(Guid objectId, TimeSpan expiresIn, string? contentType = null, CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
 
+        public Task<bool> CopyToAsync<TTargetMetadata, TTargetKey>(
+            Guid objectId, IObjectBucket<TTargetMetadata, TTargetKey> target, TTargetKey targetObjectId,
+            TTargetMetadata targetMetadata, UploadOptions? options = null, CancellationToken cancellationToken = default)
+            where TTargetMetadata : class, IObjectMetadata
+            where TTargetKey : notnull
+            => throw new NotSupportedException();
+
         // Base (Guid-keyed) interface members, shadowed by the ObjectItem<TMetadata>-typed ones above.
         Task<ObjectItem<TMetadata, Guid>?> IObjectBucket<TMetadata, Guid>.FindOneAsync(Guid objectId, CancellationToken cancellationToken)
             => throw new NotSupportedException();

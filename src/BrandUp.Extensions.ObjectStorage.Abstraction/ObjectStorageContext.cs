@@ -161,6 +161,14 @@ public abstract class ObjectStorageContext : IObjectStorageContext
         where TMetadata : class, IObjectMetadata
         => Bucket<TMetadata>().DeleteOneAsync(objectId, cancellationToken);
 
+    public Task<bool> CopyAsync<TSourceMetadata, TTargetMetadata>(
+        Guid sourceObjectId, Guid targetObjectId, TTargetMetadata targetMetadata,
+        CancellationToken cancellationToken = default)
+        where TSourceMetadata : class, IObjectMetadata
+        where TTargetMetadata : class, IObjectMetadata
+        => Bucket<TSourceMetadata>().CopyToAsync(
+            sourceObjectId, Bucket<TTargetMetadata>(), targetObjectId, targetMetadata, options: null, cancellationToken);
+
     #endregion
 
     #region Typed-key facade
@@ -184,6 +192,17 @@ public abstract class ObjectStorageContext : IObjectStorageContext
         where TMetadata : class, IObjectMetadata
         where TKey : notnull
         => Bucket<TMetadata, TKey>().DeleteOneAsync(objectId, cancellationToken);
+
+    /// <summary>Server-side copy between two buckets of this context, each with its own key type.</summary>
+    public Task<bool> CopyAsync<TSourceMetadata, TSourceKey, TTargetMetadata, TTargetKey>(
+        TSourceKey sourceObjectId, TTargetKey targetObjectId, TTargetMetadata targetMetadata,
+        CancellationToken cancellationToken = default)
+        where TSourceMetadata : class, IObjectMetadata
+        where TSourceKey : notnull
+        where TTargetMetadata : class, IObjectMetadata
+        where TTargetKey : notnull
+        => Bucket<TSourceMetadata, TSourceKey>().CopyToAsync(
+            sourceObjectId, Bucket<TTargetMetadata, TTargetKey>(), targetObjectId, targetMetadata, options: null, cancellationToken);
 
     #endregion
 }

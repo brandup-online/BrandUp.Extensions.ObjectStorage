@@ -25,7 +25,7 @@ variables:
   - name: version-major
     value: "2"
   - name: version-minor
-    value: "1"
+    value: "2"
 
 name: $(version-major).$(version-minor).$(rev:r)
 
@@ -72,15 +72,41 @@ stages:
               projects: $(restore-projects)
               arguments: --configuration $(buildConfiguration) /p:Version=$(Build.BuildNumber)
 
+          # Results and coverage are published by explicit tasks below, so the paths are known here rather
+          # than left to the task defaults. --report-trx and --coverage come from the Microsoft.Testing
+          # extensions referenced by every test project.
           - task: DotNetCoreCLI@2
             displayName: "dotnet test"
             inputs:
               command: test
               projects: $(test-projects)
-              arguments: --configuration $(buildConfiguration) --no-build --no-restore --coverage
-              failTaskOnFailedTests: true
-              publishTestResults: true
+              arguments: >
+                --configuration $(buildConfiguration) --no-build --no-restore
+                --results-directory $(Agent.TempDirectory)/TestResults
+                --report-trx
+                --coverage --coverage-output-format cobertura
+              publishTestResults: false
+
+          - task: PublishTestResults@2
+            displayName: "publish test results"
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: VSTest
+              testResultsFiles: "*.trx"
+              searchFolder: $(Agent.TempDirectory)/TestResults
               testRunTitle: "solution tests"
+              mergeTestResults: true
+              failTaskOnFailedTests: true
+
+          # Only the top level: the same reports are duplicated under In/<machine>/, and a ** pattern would
+          # count every file twice.
+          - task: PublishCodeCoverageResults@2
+            displayName: "publish code coverage"
+            condition: succeededOrFailed()
+            inputs:
+              summaryFileLocation: $(Agent.TempDirectory)/TestResults/*.cobertura.xml
+              pathToSources: $(Build.SourcesDirectory)
+              failIfCoverageEmpty: true
 
           - task: DotNetCoreCLI@2
             displayName: "dotnet pack"
@@ -134,10 +160,39 @@ stages:
             inputs:
               command: test
               projects: "**/BrandUp.Extensions.ObjectStorage.Tests/*.csproj"
-              arguments: --configuration $(buildConfiguration) --filter-trait Category=Integration
-              failTaskOnFailedTests: true
-              publishTestResults: true
+              arguments: >
+                --configuration $(buildConfiguration)
+                --filter-trait Category=Integration
+                --results-directory $(Agent.TempDirectory)/TestResults
+                --report-trx
+                --coverage --coverage-output-format cobertura
+              publishTestResults: false
+
+          - task: PublishTestResults@2
+            displayName: "publish test results (integration)"
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: VSTest
+              testResultsFiles: "*.trx"
+              searchFolder: $(Agent.TempDirectory)/TestResults
               testRunTitle: "integration tests (MinIO)"
+              failTaskOnFailedTests: true
+
+          # Kept as an artifact rather than published as a second coverage result: this job runs on a
+          # different agent, so its report names the same sources by a different absolute path and merging
+          # the two would list every file twice.
+          - task: CopyFiles@2
+            displayName: "collect integration coverage"
+            condition: succeededOrFailed()
+            inputs:
+              sourceFolder: $(Agent.TempDirectory)/TestResults
+              contents: "*.cobertura.xml"
+              targetFolder: $(Build.ArtifactStagingDirectory)/coverage
+
+          - publish: $(Build.ArtifactStagingDirectory)/coverage
+            displayName: "publish integration coverage"
+            condition: succeededOrFailed()
+            artifact: coverage-integration
 
           - script: docker rm -f minio
             displayName: "stop MinIO"
