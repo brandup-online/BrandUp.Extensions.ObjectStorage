@@ -224,6 +224,33 @@ public class FakeStorageContextTests
     }
 
     [Fact]
+    public async Task PrefixDelimiter_ComposesKeysWithoutFolder()
+    {
+        // A prefix written with a trailing '_' keeps the 2.0.x key layout: photos_<id>, not photos/<id>.
+        var services = new ServiceCollection();
+        var builder = services.AddFakeObjectStorage<MediaStorage>()
+            .WithBucketName("photos", "media/photos_")
+            .WithBucketName("videos", "media/videos")
+            .WithBucket("media");
+
+        using var sp = services.BuildServiceProvider();
+        var storage = sp.GetRequiredService<MediaStorage>();
+        var id = Guid.NewGuid();
+
+        await storage.Photos.UploadAsync(id, new PhotoMetadata(), new MemoryStream([1]));
+
+        Assert.NotNull(builder.Store.GetObject("media", $"photos_{id:d}"));
+        Assert.NotNull(await storage.Photos.FindOneAsync(id));
+
+        // Listing narrows to the same layout, so the bucket still sees only its own objects.
+        var listed = await storage.Photos.ListAsync().ToListAsync();
+        Assert.Equal($"photos_{id:d}", Assert.Single(listed).Key);
+
+        await storage.Videos.UploadAsync(Guid.NewGuid(), new VideoMetadata(), new MemoryStream([2]));
+        Assert.Single(await storage.Photos.ListAsync().ToListAsync());
+    }
+
+    [Fact]
     public async Task MissingBucket_BehavesLikeProduction()
     {
         var services = new ServiceCollection();

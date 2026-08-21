@@ -94,6 +94,41 @@ public class BucketResolverTests
     }
 
     [Fact]
+    public void ResolveDestination_PrefixDelimiter_IsKept()
+    {
+        // "photos_" means keys are composed as photos_<id> instead of photos/<id>.
+        var declared = BucketResolver.ResolveDestination("media/photos_", Buckets(), null, null, "PhotoMetadata");
+        Assert.Equal("media/photos_", declared);
+
+        var configured = BucketResolver.Resolve("Photos", Buckets(("Photos", "media/photos_")),
+            null, null, fallbackDestination: null, "Ctx.Photos");
+        Assert.Equal("media/photos_", configured);
+    }
+
+    [Theory]
+    [InlineData("media/photos__")]
+    [InlineData("media/_")]
+    [InlineData("media/photos/_")]
+    [InlineData("media/photos__/")]
+    public void Resolve_DelimiterWithoutPrefixSegment_Throws(string configured)
+    {
+        Assert.Throws<ArgumentException>(() => BucketResolver.Resolve(
+            "Photos", Buckets(("Photos", configured)), null, null, fallbackDestination: null, "Ctx.Photos"));
+    }
+
+    [Theory]
+    [InlineData("media/photos_/", "media/photos_/")]   // escape: the folder "photos_/", not the delimiter layout
+    [InlineData("media/photos/", "media/photos")]      // a redundant trailing '/' is still dropped
+    [InlineData("/media/photos", "media/photos")]
+    public void Resolve_TrailingSlash_OnlyKeptAfterTheDelimiter(string configured, string expected)
+    {
+        var result = BucketResolver.Resolve("Photos", Buckets(("Photos", configured)),
+            null, null, fallbackDestination: null, "Ctx.Photos");
+
+        Assert.Equal(expected, result);
+    }
+
+    [Fact]
     public void ResolveDestination_NameSuffix_Applied()
     {
         var result = BucketResolver.ResolveDestination("legacy/items", Buckets(), null, "-dev", "LegacyMetadata");

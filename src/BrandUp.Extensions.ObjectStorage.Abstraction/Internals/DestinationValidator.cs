@@ -6,22 +6,36 @@ namespace BrandUp.Extensions.ObjectStorage.Internals;
 /// </summary>
 internal static class DestinationValidator
 {
-    /// <summary>Joins a mapping prefix with an object identifier; shared by the S3 and fake implementations.</summary>
+    /// <summary>Delimiter used between a mapping prefix and the object identifier by default.</summary>
     public const char ObjectKeyPrefixDelimiter = '/';
+
+    /// <summary>
+    /// The one character a prefix may end with to become the delimiter itself: <c>photos_</c> composes keys as
+    /// <c>photos_1f0f…</c> instead of <c>photos/1f0f…</c>, the layout 2.0.x wrote. It is the only candidate that
+    /// is safe to reinterpret — '-' and '.' were already legal inside a prefix in released versions, so giving
+    /// them a meaning would silently move the objects of an existing configuration.
+    /// </summary>
+    public const char ExplicitPrefixDelimiter = '_';
+
+    /// <summary>Whether the prefix already ends with the delimiter to the object identifier.</summary>
+    public static bool CarriesDelimiter(string prefix)
+        => prefix.Length > 0 && (prefix[^1] == ExplicitPrefixDelimiter || prefix[^1] == ObjectKeyPrefixDelimiter);
 
     /// <summary>
     /// Composes the full object key from a mapping prefix and an already-serialized object identifier.
     /// The single place that knows the key layout, so the S3 and fake implementations cannot drift.
     /// </summary>
     public static string JoinKey(string? prefix, string objectId)
-        => prefix is null ? objectId : $"{prefix}{ObjectKeyPrefixDelimiter}{objectId}";
+        => prefix is null ? objectId
+            : CarriesDelimiter(prefix) ? prefix + objectId
+            : $"{prefix}{ObjectKeyPrefixDelimiter}{objectId}";
 
     /// <summary>
     /// Composes the effective listing prefix from a mapping prefix and a caller-supplied key prefix
     /// (relative to the mapping prefix). A <see langword="null"/> key prefix lists the whole mapping scope.
     /// </summary>
     public static string? JoinListPrefix(string? prefix, string? keyPrefix)
-        => prefix is null ? keyPrefix : $"{prefix}{ObjectKeyPrefixDelimiter}{keyPrefix}";
+        => prefix is null ? keyPrefix : JoinKey(prefix, keyPrefix ?? string.Empty);
 
     /// <summary>Validates a bucket name: letters, digits, '-' and '.', starting and ending with a letter or digit.</summary>
     public static string NormalizeBucketName(string bucketName, string paramName)
@@ -50,8 +64,10 @@ internal static class DestinationValidator
     }
 
     /// <summary>
-    /// Validates an object key prefix: letters, digits, '-', '.' and '/' as segment separator. Leading and
-    /// trailing '/' are trimmed; an empty prefix becomes <see langword="null"/> (bucket root).
+    /// Validates an object key prefix: letters, digits, '-', '.', '_' and '/' as segment separator. Leading and
+    /// trailing '/' are trimmed; an empty prefix becomes <see langword="null"/> (bucket root). A prefix ending
+    /// with '_' keeps that character as its delimiter to the object identifier; write it as <c>photos_/</c> to
+    /// get the folder layout for a segment that itself ends with '_'.
     /// </summary>
     public static string? NormalizePrefix(string? prefix, string paramName)
     {
@@ -64,9 +80,9 @@ internal static class DestinationValidator
 
         foreach (var c in prefix)
         {
-            if (!char.IsLetterOrDigit(c) && c != '/' && c != '-' && c != '.')
+            if (!char.IsLetterOrDigit(c) && c != '/' && c != '-' && c != '.' && c != '_')
                 throw new ArgumentException(
-                    $"Invalid character '{c}' in prefix. Only letters, digits, '-', '.' and '/' are allowed.", paramName);
+                    $"Invalid character '{c}' in prefix. Only letters, digits, '-', '.', '_' and '/' are allowed.", paramName);
         }
 
         if (prefix.Contains(".."))
@@ -80,6 +96,18 @@ internal static class DestinationValidator
         if (trimmed.Contains("//") || prefix.StartsWith('/'))
             throw new ArgumentException("Prefix contains consecutive '/' characters.", paramName);
 
+        // A trailing '_' is the delimiter to the object identifier, so what precedes it must be a real prefix
+        // segment: "photos__" or "media/_" would produce keys nobody meant to write.
+        if (trimmed[^1] == ExplicitPrefixDelimiter && (trimmed.Length == 1 || !char.IsLetterOrDigit(trimmed[^2])))
+            throw new ArgumentException(
+                $"Prefix '{trimmed}' ends with the delimiter '{ExplicitPrefixDelimiter}', so the character before " +
+                "it must be a letter or a digit.", paramName);
+
+        // A trailing '/' is redundant ("photos/" is "photos") except right after the delimiter, where it is the
+        // only way to ask for the folder "photos_/" instead of the delimiter layout "photos_<id>".
+        if (prefix[^1] == ObjectKeyPrefixDelimiter && trimmed[^1] == ExplicitPrefixDelimiter)
+            trimmed += ObjectKeyPrefixDelimiter;
+
         return trimmed;
     }
 
@@ -92,7 +120,9 @@ internal static class DestinationValidator
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(destination, paramName);
 
-        destination = destination.Trim().Trim('/');
+        // Only the leading '/' is dropped here: a trailing one belongs to the prefix, which is the part that
+        // knows whether it is redundant ("photos/") or the escape of the delimiter layout ("photos_/").
+        destination = destination.Trim().TrimStart('/');
 
         if (destination.Length == 0)
             throw new ArgumentException("Destination cannot be empty.", paramName);

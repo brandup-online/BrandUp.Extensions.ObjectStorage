@@ -39,6 +39,32 @@ public class ObjectMappingTests
         Assert.Equal($"items/{id}", mapping.GetObjectKey(id));
     }
 
+    [Theory]
+    [InlineData("bucket/photos_", "photos_")]
+    [InlineData("bucket/2026/photos_", "2026/photos_")]
+    public void GetObjectKey_PrefixCarryingDelimiter_JoinsWithIt(string destination, string prefix)
+    {
+        var mapping = ObjectMapping.Create(typeof(PersonMetadata), destination);
+        var id = Guid.NewGuid().ToString("d");
+
+        Assert.Equal(prefix, mapping.ObjectKeyPrefix);
+        Assert.Equal($"{prefix}{id}", mapping.GetObjectKey(id));
+    }
+
+    [Theory]
+    [InlineData("bucket/photos-", "photos-")]
+    [InlineData("bucket/photos.", "photos.")]
+    [InlineData("bucket/photos_/", "photos_/")]
+    public void GetObjectKey_OnlyUnderscoreIsADelimiter(string destination, string prefix)
+    {
+        // '-' and '.' were legal inside a prefix before, so they keep the folder layout; "photos_/" is how a
+        // segment that itself ends with '_' asks for it.
+        var mapping = ObjectMapping.Create(typeof(PersonMetadata), destination);
+        var id = Guid.NewGuid().ToString("d");
+
+        Assert.Equal($"{prefix.TrimEnd('/')}/{id}", mapping.GetObjectKey(id));
+    }
+
     [Fact]
     public void Create_KeepsPrefixCase_LowersBucketOnly()
     {
