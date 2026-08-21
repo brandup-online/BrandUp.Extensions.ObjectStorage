@@ -5,7 +5,7 @@
 ## Пакеты
 
 | Пакет | Описание |
-|---|---|
+| --- | --- |
 | `BrandUp.Extensions.ObjectStorage.Abstraction` | Интерфейсы и модели. Зависимостей от AWS SDK нет. |
 | `BrandUp.Extensions.ObjectStorage` | Реализация через AWSSDK.S3. |
 | `BrandUp.Extensions.ObjectStorage.Testing` | Фейковая in-memory реализация для тестов. |
@@ -408,7 +408,7 @@ await bucket.UpdateSettingsAsync(s =>
 Типизированные CRUD-операции, аналог `IMongoCollection<T>`. Наследует `IObjectBucket`; `IObjectBucket<TMetadata>` — частный случай с ключом `Guid` (наследует `IObjectBucket<TMetadata, Guid>`). Типы ключа — см. [Типизированные ключи объектов](#типизированные-ключи-объектов).
 
 | Метод | Описание |
-|---|---|
+| --- | --- |
 | `FindOneAsync(TKey, CancellationToken)` | Метаданные объекта. `null` если не найден. |
 | `OpenReadAsync(TKey, CancellationToken)` | Поток содержимого. `null` если не найден. |
 | `UploadAsync(TKey, TMetadata, Stream, [UploadOptions], CancellationToken)` | Загрузить объект. `UploadOptions` задаёт HTTP-атрибуты: `ContentType`, `CacheControl`, `ContentDisposition` — без `ContentType` браузер скачает файл вместо показа. |
@@ -470,7 +470,7 @@ await storage.CopyAsync<MailingFileMetadata, AttachmentMetadata>(fileId, attachm
 Упрощённый фасад над `IObjectStorageClient` для обратной совместимости.
 
 | Метод | Описание |
-|---|---|
+| --- | --- |
 | `FindAsync<T>(Guid, CancellationToken)` | Метаданные объекта. `null` если не найден. |
 | `ReadAsync<T>(Guid, CancellationToken)` | Поток содержимого. `null` если не найден. |
 | `UploadAsync<T>(Guid, T, Stream, CancellationToken)` | Загрузить объект. |
@@ -482,7 +482,7 @@ await storage.CopyAsync<MailingFileMetadata, AttachmentMetadata>(fileId, attachm
 Базовый класс типизированного контекста; сам реализует `IObjectStorageContext`. См. [Контексты хранилища и несколько аккаунтов](#контексты-хранилища-и-несколько-аккаунтов).
 
 | Член | Описание |
-|---|---|
+| --- | --- |
 | `Client` | `IObjectStorageClient` подключения контекста — управление бакетами того же аккаунта. Принимает **физические** имена, резолв ключей к нему не применяется. |
 | `Bucket<TMetadata>()` | Бакет по типу метаданных (ключ `Guid`). |
 | `Bucket<TMetadata, TKey>()` | Бакет с типизированным ключом; несоответствие объявленному типу ключа — исключение. |
@@ -499,7 +499,7 @@ Generic-перегрузки фасада с типизированным клю
 Опции задаются на подключение: у контекста с собственным подключением — свой набор, у контекстов на общем подключении — один общий.
 
 | Свойство | Описание |
-|---|---|
+| --- | --- |
 | `ServiceUrl` | URL эндпоинта S3 |
 | `AuthenticationRegion` | Регион авторизации |
 | `AccessKeyId` | Идентификатор ключа доступа |
@@ -517,7 +517,7 @@ Generic-перегрузки фасада с типизированным клю
 ### `BucketSettings`
 
 | Свойство | Тип | Описание |
-|---|---|---|
+| --- | --- | --- |
 | `Versioning` | `BucketVersioning` | `Disabled` / `Enabled` / `Suspended` |
 | `Access` | `BucketAccess` | `Private` / `PublicRead` |
 | `LifecycleRules` | `List<LifecycleRule>` | Правила жизненного цикла |
@@ -752,7 +752,7 @@ services.AddObjectStorage(opts =>
 ### Совместимость
 
 | Функция | YC |
-|---|:---:|
+| --- | :---: |
 | Загрузка / чтение / удаление объектов | ✅ |
 | Метаданные объектов | ✅ |
 | Создание / удаление бакетов | ✅ |
