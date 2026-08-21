@@ -7,6 +7,15 @@ internal interface IS3Client
     Task<S3StorageObject?> FindAsync(string bucketName, string objectKey, IEnumerable<string> metadataKeys, CancellationToken cancellationToken);
     Task<Stream?> ReadAsync(string bucketName, string objectKey, CancellationToken cancellationToken);
     Task<bool> DeleteAsync(string bucketName, string objectKey, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Server-side copy within this connection. The target metadata replaces the source one entirely;
+    /// <paramref name="options"/> replaces the source headers, and without it they are carried over.
+    /// Returns <see langword="false"/> when the source is missing.
+    /// </summary>
+    Task<bool> CopyAsync(string sourceBucketName, string sourceObjectKey,
+        string targetBucketName, string targetObjectKey,
+        IDictionary<string, string> metadata, UploadOptions? options, CancellationToken cancellationToken);
     IAsyncEnumerable<ObjectListItem> ListObjectsAsync(string bucketName, string? prefix, CancellationToken cancellationToken);
     Task<Uri> GetPresignedUrlAsync(string bucketName, string objectKey, TimeSpan expiresIn, bool forWrite, string? contentType, CancellationToken cancellationToken);
 

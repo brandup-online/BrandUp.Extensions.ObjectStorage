@@ -62,6 +62,25 @@ public class ObjectStorageOptions
     /// single PUT. Defaults to 64 MB.
     /// </summary>
     public long MultipartThreshold { get; set; } = 64L * 1024 * 1024;
+
+    /// <summary>
+    /// How many multipart parts are transferred at once, when uploading and when copying server-side.
+    /// Defaults to 1 — sequential.
+    /// <para>
+    /// Raising it is a trade for uploads: every part in flight needs its own buffer, so one upload holds
+    /// <see cref="MultipartParallelism"/> x the part size, and that is multiplied again by how many uploads
+    /// run at the same time. Mind that the part size is not always <see cref="MultipartPartSize"/>: it grows
+    /// for very large payloads (see the remarks there), up to 512 MB.
+    /// </para>
+    /// <para>A server-side copy carries no bytes through the process, so there the setting costs nothing.</para>
+    /// </summary>
+    public int MultipartParallelism { get; set; } = 1;
+
+    /// <summary>
+    /// Upper bound of <see cref="MultipartParallelism"/> — a guard against a mistyped value turning into
+    /// gigabytes of buffers, not a tuning recommendation.
+    /// </summary>
+    internal const int MaxMultipartParallelism = 64;
 }
 
 // Both dependencies are injected via DI default-value binding. credentialsProvider is the legacy marker of the
@@ -85,6 +104,13 @@ internal class ObjectStorageOptionsValidator(
         if (options.MultipartPartSize < 5 * 1024 * 1024)
             return ValidateOptionsResult.Fail(
                 $"Property {nameof(ObjectStorageOptions.MultipartPartSize)}{connection} must be at least 5 MB.");
+
+        // One part in flight is the sequential floor; zero or less would upload nothing at all. The ceiling is
+        // a guard rather than a tuning limit: the setting multiplies the buffer memory of every upload.
+        if (options.MultipartParallelism is < 1 or > ObjectStorageOptions.MaxMultipartParallelism)
+            return ValidateOptionsResult.Fail(
+                $"Property {nameof(ObjectStorageOptions.MultipartParallelism)}{connection} must be between 1 and " +
+                $"{ObjectStorageOptions.MaxMultipartParallelism}.");
 
         // Payloads up to the threshold go through a single PUT, which S3 caps at 5 GB — a larger threshold
         // would transfer gigabytes only to be rejected server-side with EntityTooLarge.
