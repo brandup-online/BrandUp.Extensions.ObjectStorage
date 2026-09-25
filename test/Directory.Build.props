@@ -1,0 +1,13 @@
+<Project>
+
+	<Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)..'))" />
+
+	<!-- Common to every test project -->
+	<PropertyGroup>
+		<IsPackable>false</IsPackable>
+		<OutputType>Exe</OutputType>
+		<!-- xUnit1051 (pass TestContext cancellation token everywhere) is noise for these fast in-memory suites -->
+		<NoWarn>$(NoWarn);xUnit1051</NoWarn>
+	</PropertyGroup>
+
+</Project>
