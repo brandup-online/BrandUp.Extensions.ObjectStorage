@@ -8,8 +8,6 @@ resources:
 
 variables:
   - group: public-nuget
-  - name: vmImageName
-    value: "ubuntu-latest"
   - name: restore-projects
     value: "**/*.csproj"
   - name: test-projects
@@ -58,12 +56,14 @@ stages:
               packageType: "sdk"
               version: "10.x"
 
+          # Sources come from the repository's nuget.config (nuget.org only), the same ones a local restore uses.
           - task: DotNetCoreCLI@2
             displayName: "dotnet restore"
             inputs:
               command: "restore"
               projects: $(restore-projects)
-              feedRestore: "BrandUp"
+              feedsToUse: "config"
+              nugetConfigPath: "nuget.config"
 
           - task: DotNetCoreCLI@2
             displayName: "dotnet build"
@@ -82,7 +82,7 @@ stages:
               projects: $(test-projects)
               arguments: >
                 --configuration $(buildConfiguration) --no-build --no-restore
-                --results-directory $(Agent.TempDirectory)/TestResults
+                --results-directory "$(Agent.TempDirectory)/TestResults"
                 --report-trx
                 --coverage --coverage-output-format cobertura
               publishTestResults: false
@@ -114,7 +114,7 @@ stages:
               command: "custom"
               projects: $(pack-projects)
               custom: "pack"
-              arguments: "--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory) /p:Version=$(Build.BuildNumber)"
+              arguments: '--configuration $(buildConfiguration) --output "$(Build.ArtifactStagingDirectory)" /p:Version=$(Build.BuildNumber)'
 
           - publish: $(build.artifactstagingdirectory)
             displayName: publish artifact
@@ -124,7 +124,7 @@ stages:
       - job: IntegrationTests
         displayName: Integration tests (MinIO)
         pool:
-          vmImage: $(vmImageName)
+          name: Test
         steps:
           - checkout: self
             fetchDepth: 1
@@ -136,19 +136,28 @@ stages:
               packageType: "sdk"
               version: "10.x"
 
-          - script: |
-              docker run -d --name minio -p 9000:9000 \
-                -e MINIO_ROOT_USER=minioadmin \
-                -e MINIO_ROOT_PASSWORD=minioadmin \
-                minio/minio server /data
-              echo "waiting for MinIO to become ready..."
-              for i in $(seq 1 30); do
-                if curl -sf http://localhost:9000/minio/health/ready; then
-                  echo "MinIO is ready"; exit 0
-                fi
-                sleep 2
-              done
-              echo "MinIO did not become ready in time"; exit 1
+          # A script step runs in cmd on the Windows agents of the Test pool, so the container is started
+          # from Windows PowerShell. Native commands report through $LASTEXITCODE, not exceptions, so
+          # errors are checked explicitly. A container left over by an interrupted run on the persistent
+          # agent is removed first, otherwise its name and port would be taken.
+          - powershell: |
+              $ErrorActionPreference = 'Continue'
+              $ProgressPreference = 'SilentlyContinue'
+
+              docker rm -f minio 2>&1 | Out-Null
+              docker run -d --name minio -p 9000:9000 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin minio/minio server /data
+              if ($LASTEXITCODE -ne 0) { exit 1 }
+
+              Write-Host "waiting for MinIO to become ready..."
+              for ($i = 0; $i -lt 30; $i++) {
+                try {
+                  Invoke-WebRequest http://localhost:9000/minio/health/ready -UseBasicParsing -TimeoutSec 5 | Out-Null
+                  Write-Host "MinIO is ready"; exit 0
+                } catch {
+                  Start-Sleep -Seconds 2
+                }
+              }
+              Write-Host "MinIO did not become ready in time"; exit 1
             displayName: "start MinIO"
 
           - task: DotNetCoreCLI@2
@@ -163,7 +172,7 @@ stages:
               arguments: >
                 --configuration $(buildConfiguration)
                 --filter-trait Category=Integration
-                --results-directory $(Agent.TempDirectory)/TestResults
+                --results-directory "$(Agent.TempDirectory)/TestResults"
                 --report-trx
                 --coverage --coverage-output-format cobertura
               publishTestResults: false
@@ -198,23 +207,6 @@ stages:
             displayName: "stop MinIO"
             condition: always()
 
-      - job: GitTag
-        displayName: Add git tag
-        dependsOn: [BuildNet, IntegrationTests]
-        condition: succeeded()
-        steps:
-          - checkout: self
-            fetchDepth: 1
-            clean: "true"
-            persistCredentials: "true"
-
-          - powershell: |
-              git config --global user.name "AzureDevOps Agent"
-              git tag "$(Build.BuildNumber)" --force
-              git push origin "$(Build.BuildNumber)" --force
-              Write-Output "Tagging $(Build.Repository.Name) with $(Build.BuildNumber)"
-            displayName: set git tag
-
   - stage: Production
     displayName: Deploy stage
     dependsOn: Build
@@ -223,7 +215,7 @@ stages:
         condition: succeeded()
         displayName: Production
         pool:
-          vmImage: $(vmImageName)
+          name: Test
         environment: $(envName)
         strategy:
           runOnce:
@@ -241,6 +233,23 @@ stages:
                     command: custom
                     custom: nuget
                     arguments: >
-                      push $(Pipeline.Workspace)/net/*.nupkg
+                      push "$(Pipeline.Workspace)/net/*.nupkg"
                       -s $(nuget-api-url)
                       -k $(nuget-api-key)
+
+      - job: GitTag
+        displayName: Add git tag
+        dependsOn: [Production]
+        condition: succeeded()
+        steps:
+          - checkout: self
+            fetchDepth: 1
+            clean: "true"
+            persistCredentials: "true"
+
+          - script: |
+              echo Tagging $(Build.Repository.Name) with $(Build.BuildNumber)
+              git config user.name "AzureDevOps Agent"
+              git tag "$(Build.BuildNumber)" --force
+              git push origin "$(Build.BuildNumber)" --force
+            displayName: set git tag
