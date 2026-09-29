@@ -13,6 +13,12 @@ static class MinioEnvironment
     public static string? SecretKey => Environment.GetEnvironmentVariable("MINIO_SECRET_KEY");
     public static string Region => Environment.GetEnvironmentVariable("MINIO_REGION") ?? "us-east-1";
 
+    /// <summary>
+    /// Names the S3-compatible server the tests run against when it is not MinIO or S3 itself, so a test can skip
+    /// a known deviation of that server instead of failing on it.
+    /// </summary>
+    public static string? Emulator => Environment.GetEnvironmentVariable("S3_EMULATOR");
+
     public static bool IsConfigured => !string.IsNullOrEmpty(ServiceUrl);
 
     /// <summary>The single place the MinIO connection settings are applied, shared by fixture and tests.</summary>

@@ -122,7 +122,7 @@ stages:
             artifact: net
 
       - job: IntegrationTests
-        displayName: Integration tests (MinIO)
+        displayName: Integration tests (SeaweedFS)
         pool:
           name: Test
         steps:
@@ -136,36 +136,20 @@ stages:
               packageType: "sdk"
               version: "10.x"
 
-          # A script step runs in cmd on the Windows agents of the Test pool, so the container is started
-          # from Windows PowerShell. Native commands report through $LASTEXITCODE, not exceptions, so
-          # errors are checked explicitly. A container left over by an interrupted run on the persistent
-          # agent is removed first, otherwise its name and port would be taken.
-          - powershell: |
-              $ErrorActionPreference = 'Continue'
-              $ProgressPreference = 'SilentlyContinue'
+          # The agents of the Test pool run Windows without Docker, and the open-source MinIO is archived, so the
+          # tests run against the S3 gateway of SeaweedFS as a plain process; the script downloads it once into the
+          # tools directory the agent keeps between runs.
+          - powershell: ci/integration-services.ps1 -Action Start -ToolsDirectory "$(Agent.ToolsDirectory)" -StateDirectory "$(Agent.TempDirectory)/services"
+            displayName: "start SeaweedFS"
 
-              docker rm -f minio 2>&1 | Out-Null
-              docker run -d --name minio -p 9000:9000 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin minio/minio server /data
-              if ($LASTEXITCODE -ne 0) { exit 1 }
-
-              Write-Host "waiting for MinIO to become ready..."
-              for ($i = 0; $i -lt 30; $i++) {
-                try {
-                  Invoke-WebRequest http://localhost:9000/minio/health/ready -UseBasicParsing -TimeoutSec 5 | Out-Null
-                  Write-Host "MinIO is ready"; exit 0
-                } catch {
-                  Start-Sleep -Seconds 2
-                }
-              }
-              Write-Host "MinIO did not become ready in time"; exit 1
-            displayName: "start MinIO"
-
+          # S3_EMULATOR lets the tests skip the known deviations of SeaweedFS from S3.
           - task: DotNetCoreCLI@2
             displayName: "dotnet test (integration)"
             env:
-              MINIO_SERVICE_URL: http://localhost:9000
-              MINIO_ACCESS_KEY: minioadmin
-              MINIO_SECRET_KEY: minioadmin
+              MINIO_SERVICE_URL: http://127.0.0.1:8333
+              MINIO_ACCESS_KEY: test
+              MINIO_SECRET_KEY: test
+              S3_EMULATOR: seaweedfs
             inputs:
               command: test
               projects: "**/BrandUp.Extensions.ObjectStorage.Tests/*.csproj"
@@ -184,7 +168,7 @@ stages:
               testResultsFormat: VSTest
               testResultsFiles: "*.trx"
               searchFolder: $(Agent.TempDirectory)/TestResults
-              testRunTitle: "integration tests (MinIO)"
+              testRunTitle: "integration tests (SeaweedFS)"
               failTaskOnFailedTests: true
 
           # Kept as an artifact rather than published as a second coverage result: this job runs on a
@@ -203,9 +187,14 @@ stages:
             condition: succeededOrFailed()
             artifact: coverage-integration
 
-          - script: docker rm -f minio
-            displayName: "stop MinIO"
+          - powershell: ci/integration-services.ps1 -Action Stop -StateDirectory "$(Agent.TempDirectory)/services"
+            displayName: "stop SeaweedFS"
             condition: always()
+
+          - publish: $(Agent.TempDirectory)/services/logs
+            displayName: "publish SeaweedFS logs"
+            condition: failed()
+            artifact: integration-services-$(System.JobAttempt)
 
   - stage: Production
     displayName: Deploy stage

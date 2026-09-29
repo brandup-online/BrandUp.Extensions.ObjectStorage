@@ -429,6 +429,9 @@ public class MinioStorageTests(MinioFixture fixture) : IClassFixture<MinioFixtur
     [MinioFact]
     public async Task Object_ServerSideCopy_MissingTargetBucket_ThrowsNoSuchBucket()
     {
+        Assert.SkipWhen(MinioEnvironment.Emulator == "seaweedfs",
+            "SeaweedFS answers a copy into a missing bucket with InternalError instead of NoSuchBucket.");
+
         var services = new ServiceCollection();
         services.AddObjectStorage(MinioEnvironment.Apply)
             .AddMapping<TestFileMetadata>(fixture.BucketName)

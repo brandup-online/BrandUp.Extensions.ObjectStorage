@@ -730,6 +730,24 @@ services.AddFakeObjectStorage<MediaStorage>()
     .WithBucketNameSuffix("-1");
 ```
 
+### Интеграционные тесты библиотеки
+
+Интеграционные тесты самой библиотеки гоняются против настоящего S3-совместимого сервера; без `MINIO_SERVICE_URL` они помечаются как skipped. Open-source MinIO заархивирован и больше не раздаёт бинарники, поэтому CI использует S3-шлюз [SeaweedFS](https://github.com/seaweedfs/seaweedfs) — один нативный бинарник. Локально на Windows его поднимает тот же скрипт, что и CI (скачивает один раз в кэш с проверкой SHA-256):
+
+```powershell
+ci/integration-services.ps1 -Action Start
+
+$env:MINIO_SERVICE_URL = "http://127.0.0.1:8333"
+$env:MINIO_ACCESS_KEY = "test"
+$env:MINIO_SECRET_KEY = "test"
+$env:S3_EMULATOR = "seaweedfs"
+dotnet test --filter-trait Category=Integration
+
+ci/integration-services.ps1 -Action Stop
+```
+
+`S3_EMULATOR` называет сервер, известные расхождения которого с S3 тесты пропускают с объяснением, а не падают на них: SeaweedFS отвечает на копирование в несуществующий бакет `InternalError` вместо `NoSuchBucket`.
+
 ---
 
 ## Yandex Cloud Object Storage
